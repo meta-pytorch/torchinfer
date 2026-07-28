@@ -7,8 +7,12 @@ from typing import Any, cast, List, Optional
 
 # @dep=//caffe2:torch
 # @manual=//triton:triton
-from triton.runtime.autotuner import Autotuner
+from triton.runtime.autotuner import Autotuner, Config
 from triton.runtime.jit import JITFunction, KernelInterface
+
+# One Triton ``Autotuner.cache``: autotune key tuple -> best ``Config``.
+# AOT-T overrides are these caches keyed by kernel name.
+AutotuneCache = dict[tuple[Any, ...], Config]
 
 
 def _is_class_alias(obj: Any, *, qualname: str, module_suffix: str) -> bool:
