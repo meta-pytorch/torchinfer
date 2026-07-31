@@ -14,9 +14,11 @@ metadata into context-specific C++ / TorchScript type strings.
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
+from aot_tensor.compile.dtypes import CTYPES
 from aot_tensor.compile.triton.spec_processing import OpsUnit
 from triton.runtime.jit import JITFunction
 
@@ -72,19 +74,48 @@ def scalar_torch_schema(triton_dtype: str) -> str:
 
 
 @dataclass(frozen=True)
-class ArgDescriptor:
+class ArgDescriptor(ABC):
     """Base class for per-arg codegen descriptors.
 
     Built once by ``build_arg_descriptors`` and consumed by all ``gen_*``
-    functions.  Use ``isinstance`` to dispatch on arg kind:
+    functions.  Arg kinds:
 
     - ``PointerArg`` — tensor pointer (required or optional)
     - ``ScalarArg`` — non-pointer signature arg with a Triton dtype
     - ``ConstantArg`` — compile-time constant with a Python type
+
+    Each kind knows how to declare itself in the four ABI contexts AOT-T
+    emits (launcher / selector / cpp op / torch schema), so ``codegen.py``
+    never switches on arg kind to build a parameter list.  A new arg kind
+    that forgets a context is an abstract-method error, not a silently
+    dropped parameter.
     """
 
     name: str
     index: int
+
+    @abstractmethod
+    def selector_param(self) -> str:
+        """Param declaration in the C++ selector signature."""
+
+    @abstractmethod
+    def cpp_op_param(self) -> str:
+        """Param declaration in the C++ torch-op wrapper signature."""
+
+    @abstractmethod
+    def torch_schema_param(self, default: str) -> str:
+        """TorchScript schema fragment.
+
+        *default* is either ``""`` or a rendered ``" = <value>"`` suffix.
+        """
+
+    def launcher_param(self, spec_dtype: str) -> str:
+        """Param declaration in a per-spec launcher signature.
+
+        *spec_dtype* is that spec's signature type for this position, which
+        may be narrower than the descriptor's invariant type.
+        """
+        return f"{CTYPES[spec_dtype]} {self.name}"
 
 
 @dataclass(frozen=True)
@@ -92,6 +123,22 @@ class PointerArg(ArgDescriptor):
     """Tensor pointer arg (required or optional)."""
 
     is_optional: bool
+
+    def selector_param(self) -> str:
+        return f"const std::optional<torch::stable::Tensor>& {self.name}"
+
+    def cpp_op_param(self) -> str:
+        return f"std::optional<torch::stable::Tensor> {self.name}"
+
+    def torch_schema_param(self, default: str) -> str:
+        # Every tensor is Tensor? even when required, for TorchScript
+        # compatibility; the alias annotation is keyed off arg position.
+        # Tensors never carry a schema default.
+        alias = chr(ord("a") + self.index)
+        return f"Tensor({alias}!)? {self.name}"
+
+    def launcher_param(self, spec_dtype: str) -> str:
+        return f"void* {self.name}"
 
 
 @dataclass(frozen=True)
@@ -107,12 +154,30 @@ class ScalarArg(ArgDescriptor):
 
     triton_dtype: str
 
+    def selector_param(self) -> str:
+        return f"{CTYPES[self.triton_dtype]} {self.name}"
+
+    def cpp_op_param(self) -> str:
+        return f"{scalar_cpp_op_ctype(self.triton_dtype)} {self.name}"
+
+    def torch_schema_param(self, default: str) -> str:
+        return f"{scalar_torch_schema(self.triton_dtype)} {self.name}{default}"
+
 
 @dataclass(frozen=True)
 class ConstantArg(ArgDescriptor):
     """Compile-time constant arg with a Python type (``int``, ``str``, ``bool``)."""
 
     python_type: type[Any]
+
+    def selector_param(self) -> str:
+        return f"{CONSTANT_SELECTOR_CTYPE[self.python_type]} {self.name}"
+
+    def cpp_op_param(self) -> str:
+        return f"{CONSTANT_CPP_OP_CTYPE[self.python_type]} {self.name}"
+
+    def torch_schema_param(self, default: str) -> str:
+        return f"{CONSTANT_TORCH_SCHEMA[self.python_type]} {self.name}{default}"
 
 
 def build_arg_descriptors(

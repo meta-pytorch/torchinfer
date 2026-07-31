@@ -24,13 +24,8 @@ from aot_tensor.compile.stable_types import PY_TYPES_TO_CPP_TYPES, SCALAR_TYPES
 from aot_tensor.compile.template_utils import TRITON_TEMPLATES
 from aot_tensor.compile.triton.arg_descriptor import (
     ArgDescriptor,
-    CONSTANT_CPP_OP_CTYPE,
-    CONSTANT_SELECTOR_CTYPE,
-    CONSTANT_TORCH_SCHEMA,
     ConstantArg,
     PointerArg,
-    scalar_cpp_op_ctype,
-    scalar_torch_schema,
     ScalarArg,
 )
 from aot_tensor.compile.triton.compat import _get_cluster_dims, get_scratch_parameters
@@ -158,11 +153,7 @@ def gen_launcher_params(
     args = ["gridDims grid"]
     for d in descriptors:
         if d.index in signature:
-            if isinstance(d, PointerArg):
-                ctype = "void*"
-            else:
-                ctype = CTYPES[signature[d.index]]
-            args.append(f"{ctype} {d.name}")
+            args.append(d.launcher_param(signature[d.index]))
     return ", ".join(args)
 
 
@@ -353,13 +344,7 @@ def gen_selector_params(
     ``T name=<default>`` (used by ``gen_selector_proto``).
     """
     args = ["gridDims grid"]
-    for d in descriptors:
-        if isinstance(d, PointerArg):
-            args.append(f"const std::optional<torch::stable::Tensor>& {d.name}")
-        elif isinstance(d, ScalarArg):
-            args.append(f"{CTYPES[d.triton_dtype]} {d.name}")
-        elif isinstance(d, ConstantArg):
-            args.append(f"{CONSTANT_SELECTOR_CTYPE[d.python_type]} {d.name}")
+    args.extend(d.selector_param() for d in descriptors)
 
     py_types = AutotuneAttrs.field_python_types()
     for f in autotune_fields:
@@ -558,14 +543,7 @@ def gen_cpp_op_params(
     descriptors: list[ArgDescriptor],
     autotune_fields: tuple[Field[Any], ...],
 ) -> str:
-    args = []
-    for d in descriptors:
-        if isinstance(d, PointerArg):
-            args.append(f"std::optional<torch::stable::Tensor> {d.name}")
-        elif isinstance(d, ScalarArg):
-            args.append(f"{scalar_cpp_op_ctype(d.triton_dtype)} {d.name}")
-        elif isinstance(d, ConstantArg):
-            args.append(f"{CONSTANT_CPP_OP_CTYPE[d.python_type]} {d.name}")
+    args = [d.cpp_op_param() for d in descriptors]
     py_types = AutotuneAttrs.field_python_types()
     for f in autotune_fields:
         args.append(f"{PY_TYPES_TO_CPP_TYPES[py_types[f.name]]} {f.name}")
@@ -588,14 +566,7 @@ def gen_torch_op_params(
         )
 
     for d in descriptors:
-        df_str = gen_default_str(d.name)
-        if isinstance(d, PointerArg):
-            t = chr(ord("a") + d.index)
-            args.append(f"Tensor({t}!)? {d.name}")
-        elif isinstance(d, ScalarArg):
-            args.append(f"{scalar_torch_schema(d.triton_dtype)} {d.name}{df_str}")
-        elif isinstance(d, ConstantArg):
-            args.append(f"{CONSTANT_TORCH_SCHEMA[d.python_type]} {d.name}{df_str}")
+        args.append(d.torch_schema_param(gen_default_str(d.name)))
     py_types = AutotuneAttrs.field_python_types()
     for f in autotune_fields:
         args.append(f"{py_types[f.name].__name__} {f.name}={f.default}")
