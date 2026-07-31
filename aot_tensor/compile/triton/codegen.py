@@ -14,7 +14,7 @@ Generates:
 import os
 import textwrap
 from collections import Counter
-from dataclasses import Field
+from dataclasses import dataclass, Field
 from typing import Any
 
 # @manual=//triton:triton
@@ -378,7 +378,137 @@ def gen_launcher_call_args(
     return ", ".join(args)
 
 
-def gen_guarded_calls(  # noqa: C901
+@dataclass(frozen=True)
+class Guard:
+    """One ``if (...)`` predicate gating a launcher specialization.
+
+    Guards are accumulated per spec and rendered as a single prefix chain, so
+    the generated dispatch is a run of nested one-armed ``if``s ending in the
+    ``return``.  Holding them as values rather than concatenated text keeps
+    each producer independently testable.
+    """
+
+    cond: str
+
+    def render(self) -> str:
+        return f"if ({self.cond}) "
+
+
+def _dtype_guards(
+    spec: KernelSpec,
+    desc_by_idx: dict[int, ArgDescriptor],
+) -> list[Guard]:
+    """Tensor dtype guards; different specs may bind different dtypes."""
+    guards = []
+    for i, ttype in spec.signature.items():
+        d = desc_by_idx[i]
+        if not isinstance(d, PointerArg):
+            continue
+        guards.append(Guard(f"{d.name}.has_value()"))
+        guards.append(Guard(f"{d.name}.value().scalar_type() == {SCALAR_TYPES[ttype]}"))
+    return guards
+
+
+def _narrowing_guards(
+    spec: KernelSpec,
+    desc_by_idx: dict[int, ArgDescriptor],
+) -> list[Guard]:
+    """Range guards for specs binding a narrower int type than the selector."""
+    guards = []
+    for i, dtype in spec.signature.items():
+        d = desc_by_idx[i]
+        if isinstance(d, ScalarArg) and dtype != d.triton_dtype and dtype == "i32":
+            guards.append(Guard(f"fits_i32({d.name})"))
+    return guards
+
+
+def _constant_guards(
+    spec: KernelSpec,
+    desc_by_idx: dict[int, ArgDescriptor],
+) -> list[Guard]:
+    """Equality guards pinning each constexpr arg to this spec's value."""
+    guards = []
+    for i, val in spec.constants.items():
+        arg = desc_by_idx[i].name
+        if isinstance(val, bool):
+            guards.append(Guard(arg if val else f"!({arg})"))
+        elif isinstance(val, str):
+            guards.append(Guard(f'{arg} == "{val}"'))
+        elif val is None:
+            guards.append(Guard(f"!{arg}.has_value()"))
+        else:
+            guards.append(Guard(f"{arg} == {val}"))
+    return guards
+
+
+def _autotune_guards(
+    spec: KernelSpec,
+    autotune_fields: tuple[Field[Any], ...],
+) -> list[Guard]:
+    guards = []
+    for f in autotune_fields:
+        v = getattr(spec.autotune, f.name)
+        # C++ bool literals are lowercase (true/false), unlike Python repr.
+        v_str = ("true" if v else "false") if isinstance(v, bool) else v
+        guards.append(Guard(f"{f.name} == {v_str}"))
+    return guards
+
+
+def _divisible_by_16_guards(
+    spec: KernelSpec,
+    desc_by_idx: dict[int, ArgDescriptor],
+) -> list[Guard]:
+    guards = []
+    for i in spec.divisible_by_16:
+        arg = desc_by_idx[i].name
+        if i in spec.signature:
+            if spec.signature[i].startswith("*"):
+                guards.append(
+                    Guard(f"(((uintptr_t){arg}.value().data_ptr()) % 16) == 0")
+                )
+            else:
+                guards.append(Guard(f"({arg} % 16) == 0"))
+        elif i in spec.constants:
+            assert (spec.constants[i] % 16) == 0
+    return guards
+
+
+def _divisible_by_8_guards(
+    spec: KernelSpec,
+    desc_by_idx: dict[int, ArgDescriptor],
+) -> list[Guard]:
+    guards = []
+    for i in spec.divisible_by_8:
+        arg = desc_by_idx[i].name
+        if i in spec.signature:
+            # divisible_by_8 is only applied to int
+            if not spec.signature[i].startswith("*"):
+                guards.append(Guard(f"({arg} % 8) == 0"))
+        elif i in spec.constants:
+            assert (spec.constants[i] % 8) == 0
+    return guards
+
+
+def spec_guards(
+    spec: KernelSpec,
+    desc_by_idx: dict[int, ArgDescriptor],
+    autotune_fields: tuple[Field[Any], ...],
+) -> list[Guard]:
+    """All guards for one spec, in emission order.
+
+    Order is load-bearing: it fixes the nesting of the generated ``if`` chain.
+    """
+    return [
+        *_dtype_guards(spec, desc_by_idx),
+        *_narrowing_guards(spec, desc_by_idx),
+        *_constant_guards(spec, desc_by_idx),
+        *_autotune_guards(spec, autotune_fields),
+        *_divisible_by_16_guards(spec, desc_by_idx),
+        *_divisible_by_8_guards(spec, desc_by_idx),
+    ]
+
+
+def gen_guarded_calls(
     func: JITFunction[list[Any]],
     unit: OpsUnit,
     descriptors: list[ArgDescriptor],
@@ -389,68 +519,9 @@ def gen_guarded_calls(  # noqa: C901
     for spec in unit.specs:
         kernel_name = gen_kernel_name(func, spec, unit.cc, autotune_fields)
         args = gen_launcher_call_args(descriptors, spec.signature)
-        guards = ""
-
-        # Guard on tensor dtypes (per-spec: different specs may have different dtypes)
-        for i, ttype in spec.signature.items():
-            d = desc_by_idx[i]
-            if not isinstance(d, PointerArg):
-                continue
-            arg = d.name
-            atype = SCALAR_TYPES[ttype]
-            guards += f"if ({arg}.has_value()) "
-            guards += f"if ({arg}.value().scalar_type() == {atype}) "
-
-        # Guard on int range (spec uses narrower type than selector)
-        for i, dtype in spec.signature.items():
-            d = desc_by_idx[i]
-            if isinstance(d, ScalarArg) and dtype != d.triton_dtype:
-                if dtype == "i32":
-                    guards += f"if (fits_i32({d.name})) "
-
-        # Guard on constant values.
-        for i, val in spec.constants.items():
-            arg = desc_by_idx[i].name
-            if isinstance(val, bool):
-                guards += f"if ({arg}) " if val else f"if (!({arg})) "
-            elif isinstance(val, str):
-                guards += f'if ({arg} == "{val}") '
-            elif val is None:
-                guards += f"if (!{arg}.has_value()) "
-            else:
-                guards += f"if ({arg} == {val}) "
-
-        # Guard on special constants
-        for f in autotune_fields:
-            v = getattr(spec.autotune, f.name)
-            # C++ bool literals are lowercase (true/false), unlike Python repr.
-            v_str = ("true" if v else "false") if isinstance(v, bool) else v
-            guards += f"if ({f.name} == {v_str}) "
-
-        # Guard on divisible_by_16
-        for i in spec.divisible_by_16:
-            arg = desc_by_idx[i].name
-            if i in spec.signature:
-                ttype = spec.signature[i]
-                if ttype.startswith("*"):
-                    guards += f"if ((((uintptr_t){arg}.value().data_ptr()) % 16) == 0) "
-                else:
-                    guards += f"if (({arg} % 16) == 0) "
-            elif i in spec.constants:
-                assert (spec.constants[i] % 16) == 0
-
-        # Guard on divisible_by_8
-        for i in spec.divisible_by_8:
-            arg = desc_by_idx[i].name
-            if i in spec.signature:
-                ttype = spec.signature[i]
-                # divisible_by_8 is only applied to int
-                if not ttype.startswith("*"):
-                    guards += f"if (({arg} % 8) == 0) "
-            elif i in spec.constants:
-                assert (spec.constants[i] % 8) == 0
-
-        # Call the specialization.
+        guards = "".join(
+            g.render() for g in spec_guards(spec, desc_by_idx, autotune_fields)
+        )
         calls.append(f"{guards}return {kernel_name}({args});\n")
     return "".join(calls)
 
