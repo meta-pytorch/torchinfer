@@ -118,6 +118,10 @@ class AOTTCompileSession:
                 )
                 for store in get_aott_compile_state().dsl_state.values():
                     store.dsl.compile_and_build(ctx)
+                # Set last: only a session that built everything counts as
+                # completed, so assert_aott_compile_session_completed() cannot pass
+                # on a half-built compile dir.
+                get_aott_compile_state().session_completed = True
         finally:
             # Always clear the marker collectors, even if a build raises, so
             # later JIT-only calls don't keep collecting into ``dsl_state``.
