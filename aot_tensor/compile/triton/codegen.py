@@ -36,6 +36,154 @@ from aot_tensor.constants import generated_header
 from triton.runtime.jit import JITFunction
 
 # ---------------------------------------------------------------------------
+# C++ templates
+#
+# Kept as module constants rather than inline f-strings so the shape of the
+# emitted code is readable without stepping through the emitters, mirroring
+# ``cubin_embedder.KERNEL_BINARY_ARRAY_TEMPLATE``. Indentation is preserved and
+# ``textwrap.dedent`` still applied at the call site: several substituted
+# values are multi-line and join at an indent tuned for this layout, so
+# flush-lefting the templates would misindent them.
+# ---------------------------------------------------------------------------
+
+_CUBIN_EXTERN_TMPL = (
+    'extern "C" {{ extern unsigned char {sym}[]; '
+    "extern const void* volatile {sym}_ptr; }}"
+)
+
+_LOADER_TMPL = """
+        CUfunction load_{kernel_name}(void)
+        {{
+            thread_local std::unordered_map<int32_t, CUfunction> cache;
+            auto idx = torch::stable::accelerator::getCurrentDeviceIndex();
+            auto res = cache.find(idx);
+            if (res != cache.end()) {{
+                return res->second;
+            }}
+            CUfunction func;
+            CUmodule mod_ptr;
+            CUresult err;
+            // Use pointer to cubin data to generate R_X86_64_64 relocation
+            // instead of R_X86_64_32, allowing cubin data to be placed beyond 4GB
+            const void *image = {kernel_name}_cubin_ptr;
+
+            err = cuModuleLoadData(&mod_ptr, image);
+            if (err != 0) {{
+                const char* errStr;
+                cuGetErrorString(err, &errStr);
+                throw std::runtime_error("cuModuleLoadData failed for {kernel_name}: error " + std::to_string(err) + " (" + (errStr ? errStr : "unknown") + ")");
+            }}
+
+            err = cuModuleGetFunction(&func, mod_ptr, "{cubin_name}");
+            if (err != 0) {{
+                const char* errStr;
+                cuGetErrorString(err, &errStr);
+                throw std::runtime_error("cuModuleGetFunction failed for {kernel_name}: error " + std::to_string(err) + " (" + (errStr ? errStr : "unknown") + ")");
+            }}
+
+            enable_large_smem_or_throw({shared}, func);
+            cache.emplace(idx, func);
+            return func;
+        }}
+    """
+
+_LAUNCHER_FAST_TMPL = """
+        void {kernel_name}({params}) {{
+            CUfunction func = load_{kernel_name}();
+            CUstream stream = grid.stream ? grid.stream : triton_aot_get_current_stream();
+            {scratch_declarations}
+            uint32_t grid_arr[3] = {{(uint32_t)grid.x, (uint32_t)grid.y, (uint32_t)grid.z}};
+            {safe_name}_args_t args = {{ {struct_init} }};
+            TRITON_AOT_CU_CHECK(triton_launch_{safe_name}(grid_arr, stream, func, &args, global_scratch, profile_scratch));
+        }}
+        """
+
+_LAUNCHER_LEGACY_TMPL = """
+        void {kernel_name}({params}) {{
+            CUfunction func = load_{kernel_name}();
+            cudaStream_t stream = grid.stream ? grid.stream : triton_aot_get_current_stream();
+            {scratch_declarations}
+            void *args[] = {{ {args_str} }};
+            {launch_call}
+            TRITON_AOT_CU_CHECK(res);
+        }}
+    """
+
+_SELECTOR_TMPL = """
+        void {func_name}({params}) {{
+            auto cc = compute_capability();
+            if (grid.x * grid.y * grid.z > 0) {{
+                {guarded_calls}
+                std::stringstream ss;
+                ss << "[TritonAOT] No implementation found for {func_name}" << {failure_msg};
+                throw std::runtime_error(ss.str());
+            }}
+        }}
+    """
+
+_TORCH_OP_TMPL = """
+        namespace {{
+        triton::aot::gridDims dims_from_vec(
+            const std::vector<int64_t>& grid
+        ) {{
+          return triton::aot::gridDims(
+              grid.size() > 0 ? grid[0] : 1,
+              grid.size() > 1 ? grid[1] : 1,
+              grid.size() > 2 ? grid[2] : 1
+          );
+        }}
+
+        {type_comment}void {func_name}_op(
+            std::vector<int64_t> grid,
+            {cpp_params}
+        ) {{
+            triton::aot::{func_name}(
+                dims_from_vec(grid),
+                {args}
+            );
+        }}
+
+        void {func_name}_dummy_op(
+            std::vector<int64_t> grid,
+            {cpp_params}
+        ) {{
+            // Do nothing.  The op is a dummy for model transform,
+            // processing, and splitting services.
+        }}
+        }}
+
+        STABLE_TORCH_LIBRARY_FRAGMENT(triton_aot, m) {{
+          m.def("{schema}");
+        }}
+        STABLE_TORCH_LIBRARY_IMPL(triton_aot, CUDA, m) {{
+          m.impl("{func_name}", TORCH_BOX(&{func_name}_op));
+        }}
+
+        STABLE_TORCH_LIBRARY_IMPL(triton_aot, CPU, m) {{
+          m.impl("{func_name}", TORCH_BOX(&{func_name}_dummy_op));
+        }}
+
+        STABLE_TORCH_LIBRARY_IMPL(triton_aot, Meta, m) {{
+          m.impl("{func_name}", TORCH_BOX(&{func_name}_dummy_op));
+        }}
+        """
+
+_META_PY_TMPL = """
+    def {meta_func_name}({in_args}):
+        {returns_comment}
+        {guards}
+        {tail}
+    """
+
+_META_CPP_TMPL = """
+    inline std::tuple<{return_type}> {meta}({in_args}) {{
+        {guards}
+        {tail}
+    }}
+    """
+
+
+# ---------------------------------------------------------------------------
 # Kernel naming and binary generation
 # ---------------------------------------------------------------------------
 
@@ -97,48 +245,16 @@ def gen_cubin(kernel_name: str, kernel: Any, install_dir: str, backend: str) -> 
     # instead of R_X86_64_32, which allows the .triton section to be placed
     # beyond the 4GB address limit in large binaries.
     # Note: The pointer is volatile to prevent optimizer constant-propagation.
-    return f'extern "C" {{ extern unsigned char {target_symbol_name}[]; extern const void* volatile {target_symbol_name}_ptr; }}'
+    return _CUBIN_EXTERN_TMPL.format(sym=target_symbol_name)
 
 
 def gen_loader(kernel_name: str, cubin_name: str, shared: int) -> str:
     # TODO(changpan): Extract inline cuModuleLoadData/cuModuleGetFunction error
     # handling into a shared helper to reduce generated code size.
     return textwrap.dedent(
-        f"""
-        CUfunction load_{kernel_name}(void)
-        {{
-            thread_local std::unordered_map<int32_t, CUfunction> cache;
-            auto idx = torch::stable::accelerator::getCurrentDeviceIndex();
-            auto res = cache.find(idx);
-            if (res != cache.end()) {{
-                return res->second;
-            }}
-            CUfunction func;
-            CUmodule mod_ptr;
-            CUresult err;
-            // Use pointer to cubin data to generate R_X86_64_64 relocation
-            // instead of R_X86_64_32, allowing cubin data to be placed beyond 4GB
-            const void *image = {kernel_name}_cubin_ptr;
-
-            err = cuModuleLoadData(&mod_ptr, image);
-            if (err != 0) {{
-                const char* errStr;
-                cuGetErrorString(err, &errStr);
-                throw std::runtime_error("cuModuleLoadData failed for {kernel_name}: error " + std::to_string(err) + " (" + (errStr ? errStr : "unknown") + ")");
-            }}
-
-            err = cuModuleGetFunction(&func, mod_ptr, "{cubin_name}");
-            if (err != 0) {{
-                const char* errStr;
-                cuGetErrorString(err, &errStr);
-                throw std::runtime_error("cuModuleGetFunction failed for {kernel_name}: error " + std::to_string(err) + " (" + (errStr ? errStr : "unknown") + ")");
-            }}
-
-            enable_large_smem_or_throw({shared}, func);
-            cache.emplace(idx, func);
-            return func;
-        }}
-    """
+        _LOADER_TMPL.format(
+            kernel_name=kernel_name, cubin_name=cubin_name, shared=shared
+        )
     )
 
 
@@ -289,16 +405,13 @@ def gen_launcher(
             "\n"
             + launcher_src
             + textwrap.dedent(
-                f"""
-        void {kernel_name}({params}) {{
-            CUfunction func = load_{kernel_name}();
-            CUstream stream = grid.stream ? grid.stream : triton_aot_get_current_stream();
-            {scratch_declarations}
-            uint32_t grid_arr[3] = {{(uint32_t)grid.x, (uint32_t)grid.y, (uint32_t)grid.z}};
-            {safe_name}_args_t args = {{ {struct_init} }};
-            TRITON_AOT_CU_CHECK(triton_launch_{safe_name}(grid_arr, stream, func, &args, global_scratch, profile_scratch));
-        }}
-        """
+                _LAUNCHER_FAST_TMPL.format(
+                    kernel_name=kernel_name,
+                    params=params,
+                    scratch_declarations=scratch_declarations,
+                    safe_name=safe_name,
+                    struct_init=struct_init,
+                )
             )
         )
 
@@ -315,16 +428,13 @@ def gen_launcher(
     )
 
     return textwrap.dedent(
-        f"""
-        void {kernel_name}({params}) {{
-            CUfunction func = load_{kernel_name}();
-            cudaStream_t stream = grid.stream ? grid.stream : triton_aot_get_current_stream();
-            {scratch_declarations}
-            void *args[] = {{ {args_str} }};
-            {launch_call}
-            TRITON_AOT_CU_CHECK(res);
-        }}
-    """
+        _LAUNCHER_LEGACY_TMPL.format(
+            kernel_name=kernel_name,
+            params=params,
+            scratch_declarations=scratch_declarations,
+            args_str=args_str,
+            launch_call=launch_call,
+        )
     )
 
 
@@ -593,17 +703,12 @@ def gen_selector(
     params = gen_selector_params(descriptors, autotune_fields)
     guarded_calls = gen_guarded_calls(func, unit, descriptors, autotune_fields)
     failure_msg = gen_failure_msg(descriptors, autotune_fields)
-    return f"""
-        void {func.__name__}({params}) {{
-            auto cc = compute_capability();
-            if (grid.x * grid.y * grid.z > 0) {{
-                {guarded_calls}
-                std::stringstream ss;
-                ss << "[TritonAOT] No implementation found for {func.__name__}" << {failure_msg};
-                throw std::runtime_error(ss.str());
-            }}
-        }}
-    """
+    return _SELECTOR_TMPL.format(
+        func_name=func.__name__,
+        params=params,
+        guarded_calls=guarded_calls,
+        failure_msg=failure_msg,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -676,53 +781,15 @@ def gen_torch_op(
             "for TorchScript compatibility.\n"
             "// Dispatch uses HAS_XXX constexpr ints, not tensor presence.\n"
         )
+    schema = gen_torch_op_schema(func, descriptors, default_values, autotune_fields)
     return textwrap.dedent(
-        f"""
-        namespace {{
-        triton::aot::gridDims dims_from_vec(
-            const std::vector<int64_t>& grid
-        ) {{
-          return triton::aot::gridDims(
-              grid.size() > 0 ? grid[0] : 1,
-              grid.size() > 1 ? grid[1] : 1,
-              grid.size() > 2 ? grid[2] : 1
-          );
-        }}
-
-        {type_comment}void {func.__name__}_op(
-            std::vector<int64_t> grid,
-            {cpp_params}
-        ) {{
-            triton::aot::{func.__name__}(
-                dims_from_vec(grid),
-                {args}
-            );
-        }}
-
-        void {func.__name__}_dummy_op(
-            std::vector<int64_t> grid,
-            {cpp_params}
-        ) {{
-            // Do nothing.  The op is a dummy for model transform,
-            // processing, and splitting services.
-        }}
-        }}
-
-        STABLE_TORCH_LIBRARY_FRAGMENT(triton_aot, m) {{
-          m.def("{gen_torch_op_schema(func, descriptors, default_values, autotune_fields)}");
-        }}
-        STABLE_TORCH_LIBRARY_IMPL(triton_aot, CUDA, m) {{
-          m.impl("{func.__name__}", TORCH_BOX(&{func.__name__}_op));
-        }}
-
-        STABLE_TORCH_LIBRARY_IMPL(triton_aot, CPU, m) {{
-          m.impl("{func.__name__}", TORCH_BOX(&{func.__name__}_dummy_op));
-        }}
-
-        STABLE_TORCH_LIBRARY_IMPL(triton_aot, Meta, m) {{
-          m.impl("{func.__name__}", TORCH_BOX(&{func.__name__}_dummy_op));
-        }}
-        """
+        _TORCH_OP_TMPL.format(
+            type_comment=type_comment,
+            func_name=func.__name__,
+            cpp_params=cpp_params,
+            args=args,
+            schema=schema,
+        )
     )
 
 
@@ -819,12 +886,13 @@ def gen_tuner_meta_py(
     returns_comment = f"# Returns: ({', '.join(return_names)})"
 
     return generated_header("#") + textwrap.dedent(
-        f"""
-    def {meta_func_name}({in_args}):
-        {returns_comment}
-        {guards}
-        {fallback_str if tuner_fallback else raise_runtime_error_str}
-    """
+        _META_PY_TMPL.format(
+            meta_func_name=meta_func_name,
+            in_args=in_args,
+            returns_comment=returns_comment,
+            guards=guards,
+            tail=fallback_str if tuner_fallback else raise_runtime_error_str,
+        )
     )
 
 
@@ -872,12 +940,13 @@ def gen_tuner_meta_cpp(
     # Infer the return type from the actual values
     return_type = _infer_return_type(vals[0])
     return textwrap.dedent(
-        f"""
-    inline std::tuple<{return_type}> {meta}({in_args}) {{
-        {guards}
-        {fallback_str if tuner_fallback else raise_runtime_error_str}
-    }}
-    """
+        _META_CPP_TMPL.format(
+            return_type=return_type,
+            meta=meta,
+            in_args=in_args,
+            guards=guards,
+            tail=fallback_str if tuner_fallback else raise_runtime_error_str,
+        )
     )
 
 
