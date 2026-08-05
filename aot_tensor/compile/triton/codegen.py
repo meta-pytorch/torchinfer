@@ -186,12 +186,13 @@ void {func_name}_dummy_op(
   // Do nothing.  The op is a dummy for model transform,
   // processing, and splitting services.
 }}
-}}
+}} // namespace
 
 STABLE_TORCH_LIBRARY_FRAGMENT(triton_aot, m) {{
   m.def(
       {schema_literals});
 }}
+
 STABLE_TORCH_LIBRARY_IMPL(triton_aot, CUDA, m) {{
   m.impl("{func_name}", TORCH_BOX(&{func_name}_op));
 }}

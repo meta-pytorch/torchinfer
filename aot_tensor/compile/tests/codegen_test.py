@@ -572,6 +572,12 @@ class CompilerTest(unittest.TestCase):
             "STABLE_TORCH_LIBRARY_IMPL(triton_aot, Meta, m)",
             "TORCH_BOX",
             "non-optional but use Tensor?",
+            # Both pin a position, not just a presence. Which brace carries
+            # the namespace comment is the point, and the second string is the
+            # only thing covering the blank line before the CUDA block -- the
+            # first one spans a separator that already existed.
+            "}\n} // namespace\n\nSTABLE_TORCH_LIBRARY_FRAGMENT",
+            "}\n\nSTABLE_TORCH_LIBRARY_IMPL(triton_aot, CUDA, m)",
         ]
         for s in expected_strs:
             self.assertIn(s, result)
