@@ -288,7 +288,9 @@ def compile_to_cpp(
         json.dump(
             [gen_torch_op_schema(func, descriptors, default_values, autotune_fields)],
             fp,
+            indent=2,
         )
+        fp.write("\n")
 
     meta_func = tuned_func if tuned_func else func
     with open(py_out, "w") as fp:

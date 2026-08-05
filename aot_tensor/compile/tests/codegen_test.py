@@ -4,6 +4,7 @@
 # pyre-ignore-all-errors[2]: triton func without type
 
 import dataclasses
+import re
 import types
 import unittest
 from typing import Any, Dict, List
@@ -21,6 +22,9 @@ from aot_tensor.compile.triton.arg_descriptor import (
     ScalarArg,
 )
 from aot_tensor.compile.triton.codegen import (
+    _as_cpp_string_literals,
+    _CONT,
+    _INDENT,
     gen_cpp_op_params,
     gen_failure_msg,
     gen_guarded_calls,
@@ -42,6 +46,23 @@ from aot_tensor.compile.triton.codegen import (
 from aot_tensor.compile.triton.spec_processing import AutotuneAttrs, KernelSpec, OpsUnit
 from parameterized import parameterized
 from triton.runtime import JITFunction
+
+_CPP_STRING_LITERAL = r'"((?:[^"\\]|\\.)*)"'
+
+# Between today's peak (140) and the shortest regression this catches (231).
+# The floor is the ~130-char kernel symbol, not anything reformattable.
+_MAX_GENERATED_LINE = 200
+
+
+def _schema_from_registration(content: str) -> str:
+    """Reassemble the schema from the ``m.def(...)`` registration.
+
+    Codegen splits it across adjacent C++ string literals, which the compiler
+    concatenates back into one string.
+    """
+    match = re.search(rf"m\.def\(\s*((?:{_CPP_STRING_LITERAL}\s*)+)\)", content)
+    assert match is not None, f"no m.def(...) registration found in:\n{content}"
+    return "".join(re.findall(_CPP_STRING_LITERAL, match.group(1)))
 
 
 @triton.jit
@@ -395,7 +416,10 @@ class CompilerTest(unittest.TestCase):
             "_addmm_fwd_meta(int64_t N, int64_t K)",
             "N == 256 && K == 1024",
             "N == 128 && K == 256",
-            "void _addmm_fwd(gridDims grid",
+            # The proto is emitted one parameter per line, so the signature is
+            # no longer a single contiguous string.
+            "void _addmm_fwd(",
+            "gridDims grid",
             "const std::optional<torch::stable::Tensor>& x_ptr",
             "int num_warps=4",
         ]
@@ -542,7 +566,7 @@ class CompilerTest(unittest.TestCase):
             f"void {func.__name__}_op(",
             f"void {func.__name__}_dummy_op(",
             "STABLE_TORCH_LIBRARY_FRAGMENT(triton_aot, m)",
-            f'm.def("{func.__name__}(int[] grid,',
+            "m.def(",
             "STABLE_TORCH_LIBRARY_IMPL(triton_aot, CUDA, m)",
             "STABLE_TORCH_LIBRARY_IMPL(triton_aot, CPU, m)",
             "STABLE_TORCH_LIBRARY_IMPL(triton_aot, Meta, m)",
@@ -551,6 +575,12 @@ class CompilerTest(unittest.TestCase):
         ]
         for s in expected_strs:
             self.assertIn(s, result)
+
+        self.assertTrue(
+            _schema_from_registration(result).startswith(
+                f"{func.__name__}(int[] grid, "
+            )
+        )
 
         # D4: no unstable ATen references
         self.assertNotIn("<ATen/Tensor.h>", result)
@@ -582,6 +612,48 @@ class CompilerTest(unittest.TestCase):
 
         self.assertIn(expected_str, result)
 
+    def test_generated_cpp_has_no_overlong_lines(self) -> None:
+        """Catches an emitter going back to ``", ".join(...)``, which is how the
+        selector became a single 4,000-char line."""
+        func = self._create_mock_func()
+        unit = self._create_mock_unit()
+        descriptors = self._create_descriptors()
+        autotune_fields = AutotuneAttrs.fields_for("cuda")
+
+        contents = {
+            "header": generate_header_content(
+                tuned_func=self._create_mock_tuned_func(),
+                func=func,
+                unit=unit,
+                descriptors=descriptors,
+                tuner_fallback=True,
+                autotune_fields=autotune_fields,
+            ),
+            "kernel.cpp": generate_kernel_cpp_content(
+                func,
+                unit,
+                descriptors,
+                "_addmm_fwd",
+                ["// mock generated specs from spec_gen"],
+                autotune_fields,
+                backend="cuda",
+            ),
+            "torch_op.cpp": generate_torch_op_content(
+                func, descriptors, "_addmm_fwd", {}, autotune_fields
+            ),
+        }
+
+        longest = {
+            name: max(len(line) for line in content.splitlines())
+            for name, content in contents.items()
+        }
+        self.assertLessEqual(
+            max(longest.values()),
+            _MAX_GENERATED_LINE,
+            f"generated C++ has an overlong line ({longest}); something was "
+            "re-joined onto one line",
+        )
+
     def test_gen_torch_op_schema_matches_cpp_registration(self) -> None:
         func = self._create_mock_func()
         descriptors = self._create_descriptors()
@@ -597,7 +669,10 @@ class CompilerTest(unittest.TestCase):
             AutotuneAttrs.fields_for("cuda"),
         )
 
-        self.assertIn(schema, content)
+        # The registration splits the schema across adjacent string literals,
+        # which the compiler concatenates. Reassemble rather than substring
+        # match, so this still proves the two are byte-identical.
+        self.assertEqual(_schema_from_registration(content), schema)
         self.assertEqual(schema.split("(", 1)[0], func.__name__)
         self.assertIn("int[] grid", schema)
         self.assertIn("Tensor(a!)? x_ptr", schema)
@@ -689,6 +764,38 @@ class GenKernelNameTest(unittest.TestCase):
                         self.assertNotIn(amd_only, name)
                 else:
                     self.assertNotIn("cta", name)
+
+
+class AsCppStringLiteralsTest(unittest.TestCase):
+    """Splitting a schema across adjacent literals must not change its value.
+
+    String defaults (``gen_str_wrap`` emits ``\\"value\\"``) are the risky
+    shape; no schema in tree has one yet, so cover it here.
+    """
+
+    @parameterized.expand(
+        [
+            ("no_string_default", "_k(int[] grid, int M, int num_warps=4) -> ()"),
+            ("string_default", '_k(int[] grid, str mode=\\"foo\\", int y=1) -> ()'),
+            (
+                "comma_space_inside",
+                '_k(int[] grid, str mode=\\"a, b\\", int y=1) -> ()',
+            ),
+            ("two_string_defaults", '_k(str a=\\"x\\", str b=\\"y\\", int c=3) -> ()'),
+        ]
+    )
+    def test_round_trips(self, _name: str, schema: str) -> None:
+        rendered = _as_cpp_string_literals(schema, indent=4, width=24)
+        self.assertGreater(rendered.count("\n"), 0, "expected a multi-line split")
+        # Concatenating the literal bodies must reproduce the input exactly, and
+        # no chunk may end in a backslash that would escape its closing quote.
+        bodies = re.findall(_CPP_STRING_LITERAL, rendered)
+        self.assertEqual("".join(bodies), schema)
+        for body in bodies:
+            trailing = len(body) - len(body.rstrip("\\"))
+            self.assertEqual(
+                trailing % 2, 0, f"chunk ends in odd backslashes: {body!r}"
+            )
 
 
 class GenTorchOpParamsTest(unittest.TestCase):
@@ -1082,13 +1189,16 @@ class IntWidthCodegenTest(unittest.TestCase):
             _kernel, unit, descriptors, AutotuneAttrs.fields_for("cuda")
         )
 
-        lines = result.strip().split("\n")
+        # Guards are emitted one per line, so a spec is a block of lines rather
+        # than a single line; blocks are separated by a blank line.
+        specs = result.strip().split("\n\n")
+        self.assertEqual(len(specs), 2)
         # First spec (i32): fits_i32 guard + static_cast
-        self.assertIn("fits_i32(N)", lines[0])
-        self.assertIn("static_cast<int32_t>(N)", lines[0])
+        self.assertIn("fits_i32(N)", specs[0])
+        self.assertIn("static_cast<int32_t>(N)", specs[0])
         # Second spec (i64): neither fits_i32 nor static_cast
-        self.assertNotIn("fits_i32", lines[1])
-        self.assertNotIn("static_cast", lines[1])
+        self.assertNotIn("fits_i32", specs[1])
+        self.assertNotIn("static_cast", specs[1])
 
 
 class IsNonEmptyMappingOfTypeTest(unittest.TestCase):
@@ -1268,6 +1378,17 @@ class GenLauncherLevel1Test(unittest.TestCase):
             self.assertIn(s, result)
         for s in expected_not_in:
             self.assertNotIn(s, result)
+
+        # Guards both launcher paths against a re-joined parameter list.
+        # A length bound would not work here: the real driver of length is the
+        # ~130-char kernel symbol, and this mock's name is short, so a re-join
+        # would still fit. Assert the structure instead.
+        self.assertIn(
+            "void test_kernel_sm80(\n",
+            result,
+            f"launcher (launcher_src={with_launcher_src}) put its parameter "
+            "list on the signature line",
+        )
 
     def test_fast_path_scales_scratch_by_num_ctas(self) -> None:
         """Fast (Level 1) path still routes scratch sizing through
@@ -1456,3 +1577,16 @@ class GenLauncherClusterTest(unittest.TestCase):
         ):
             self.assertIn(marker, cpp, f"missing `{marker}`")
         self.assertNotIn("cuLaunchKernel(", cpp)
+
+        # Both of these are multi-line values interpolated into the launcher
+        # template, and both are joined at an indent their producer hardcodes.
+        # A line deeper than the template's nesting means one of those joins
+        # went stale. The deepest legitimate line here is the `void *args[]`
+        # entries at _INDENT + _CONT; a body that drifted back to 4-space would
+        # push them past this.
+        over_indented = [
+            line
+            for line in cpp.splitlines()
+            if line.strip() and len(line) - len(line.lstrip()) > _INDENT + _CONT
+        ]
+        self.assertEqual(over_indented, [], f"over-indented: {over_indented[:3]}")

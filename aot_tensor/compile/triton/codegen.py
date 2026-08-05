@@ -35,152 +35,191 @@ from aot_tensor.compile.triton.utils import hash_kernel_name, unwrap_to_jit
 from aot_tensor.constants import generated_header
 from triton.runtime.jit import JITFunction
 
+# Indent widths from the repo ``.clang-format``. Values interpolated into a
+# multi-line slot are joined at these columns so they line up with the
+# template text around them; keeping them named makes the two move together.
+_INDENT = 2
+_CONT = 4
+
 # ---------------------------------------------------------------------------
 # C++ templates
 #
 # Kept as module constants rather than inline f-strings so the shape of the
 # emitted code is readable without stepping through the emitters, mirroring
-# ``cubin_embedder.KERNEL_BINARY_ARRAY_TEMPLATE``. Indentation is preserved and
-# ``textwrap.dedent`` still applied at the call site: several substituted
-# values are multi-line and join at an indent tuned for this layout, so
-# flush-lefting the templates would misindent them.
+# ``cubin_embedder.KERNEL_BINARY_ARRAY_TEMPLATE``.
+#
+# All are flush-left, so the ``indent=`` values their callers pass line up
+# with the columns you can see here.
+#
+# C++ bodies follow the repo ``.clang-format``: ``IndentWidth: 2``,
+# ``ContinuationIndentWidth: 4`` -- see ``_INDENT`` / ``_CONT``. Linters skip
+# the emitted files (see ``constants.GENERATED_TOKEN``), so matching
+# clang-format by hand is what keeps them readable next to the hand-written
+# templates they are spliced into.
+#
+# Do not spell that marker out in this file: arc reads it as a header tag and
+# silently stops linting the whole module, which is why the constant is
+# assembled at runtime rather than written literally.
 # ---------------------------------------------------------------------------
 
-_CUBIN_EXTERN_TMPL = (
-    'extern "C" {{ extern unsigned char {sym}[]; '
-    "extern const void* volatile {sym}_ptr; }}"
-)
+_CUBIN_EXTERN_TMPL = """\
+extern "C" {{
+extern unsigned char {sym}[];
+extern const void* volatile {sym}_ptr;
+}}"""
 
 _LOADER_TMPL = """
-        CUfunction load_{kernel_name}(void)
-        {{
-            thread_local std::unordered_map<int32_t, CUfunction> cache;
-            auto idx = torch::stable::accelerator::getCurrentDeviceIndex();
-            auto res = cache.find(idx);
-            if (res != cache.end()) {{
-                return res->second;
-            }}
-            CUfunction func;
-            CUmodule mod_ptr;
-            CUresult err;
-            // Use pointer to cubin data to generate R_X86_64_64 relocation
-            // instead of R_X86_64_32, allowing cubin data to be placed beyond 4GB
-            const void *image = {kernel_name}_cubin_ptr;
+CUfunction load_{kernel_name}(void)
+{{
+  thread_local std::unordered_map<int32_t, CUfunction> cache;
+  auto idx = torch::stable::accelerator::getCurrentDeviceIndex();
+  auto res = cache.find(idx);
+  if (res != cache.end()) {{
+    return res->second;
+  }}
+  CUfunction func;
+  CUmodule mod_ptr;
+  CUresult err;
+  // Use pointer to cubin data to generate R_X86_64_64 relocation
+  // instead of R_X86_64_32, allowing cubin data to be placed beyond 4GB
+  const void *image = {kernel_name}_cubin_ptr;
 
-            err = cuModuleLoadData(&mod_ptr, image);
-            if (err != 0) {{
-                const char* errStr;
-                cuGetErrorString(err, &errStr);
-                throw std::runtime_error("cuModuleLoadData failed for {kernel_name}: error " + std::to_string(err) + " (" + (errStr ? errStr : "unknown") + ")");
-            }}
+  err = cuModuleLoadData(&mod_ptr, image);
+  if (err != 0) {{
+    const char* errStr;
+    cuGetErrorString(err, &errStr);
+    throw std::runtime_error(
+        "cuModuleLoadData failed for "
+        "{kernel_name}"
+        ": error " + std::to_string(err)
+        + " (" + (errStr ? errStr : "unknown") + ")");
+  }}
 
-            err = cuModuleGetFunction(&func, mod_ptr, "{cubin_name}");
-            if (err != 0) {{
-                const char* errStr;
-                cuGetErrorString(err, &errStr);
-                throw std::runtime_error("cuModuleGetFunction failed for {kernel_name}: error " + std::to_string(err) + " (" + (errStr ? errStr : "unknown") + ")");
-            }}
+  err = cuModuleGetFunction(&func, mod_ptr, "{cubin_name}");
+  if (err != 0) {{
+    const char* errStr;
+    cuGetErrorString(err, &errStr);
+    throw std::runtime_error(
+        "cuModuleGetFunction failed for "
+        "{kernel_name}"
+        ": error " + std::to_string(err)
+        + " (" + (errStr ? errStr : "unknown") + ")");
+  }}
 
-            enable_large_smem_or_throw({shared}, func);
-            cache.emplace(idx, func);
-            return func;
-        }}
-    """
+  enable_large_smem_or_throw({shared}, func);
+  cache.emplace(idx, func);
+  return func;
+}}
+"""
 
 _LAUNCHER_FAST_TMPL = """
-        void {kernel_name}({params}) {{
-            CUfunction func = load_{kernel_name}();
-            CUstream stream = grid.stream ? grid.stream : triton_aot_get_current_stream();
-            {scratch_declarations}
-            uint32_t grid_arr[3] = {{(uint32_t)grid.x, (uint32_t)grid.y, (uint32_t)grid.z}};
-            {safe_name}_args_t args = {{ {struct_init} }};
-            TRITON_AOT_CU_CHECK(triton_launch_{safe_name}(grid_arr, stream, func, &args, global_scratch, profile_scratch));
-        }}
-        """
+void {kernel_name}(
+    {params}) {{
+  CUfunction func = load_{kernel_name}();
+  CUstream stream =
+      grid.stream ? grid.stream : triton_aot_get_current_stream();
+  {scratch_declarations}
+  uint32_t grid_arr[3] = {{
+      (uint32_t)grid.x, (uint32_t)grid.y, (uint32_t)grid.z}};
+  {safe_name}_args_t args = {{
+      {struct_init}}};
+  TRITON_AOT_CU_CHECK(triton_launch_{safe_name}(
+      grid_arr, stream, func, &args, global_scratch, profile_scratch));
+}}
+"""
 
 _LAUNCHER_LEGACY_TMPL = """
-        void {kernel_name}({params}) {{
-            CUfunction func = load_{kernel_name}();
-            cudaStream_t stream = grid.stream ? grid.stream : triton_aot_get_current_stream();
-            {scratch_declarations}
-            void *args[] = {{ {args_str} }};
-            {launch_call}
-            TRITON_AOT_CU_CHECK(res);
-        }}
-    """
+void {kernel_name}(
+    {params}) {{
+  CUfunction func = load_{kernel_name}();
+  cudaStream_t stream =
+      grid.stream ? grid.stream : triton_aot_get_current_stream();
+  {scratch_declarations}
+  void *args[] = {{
+      {args_str}
+  }};
+  {launch_call}
+  TRITON_AOT_CU_CHECK(res);
+}}
+"""
 
 _SELECTOR_TMPL = """
-        void {func_name}({params}) {{
-            auto cc = compute_capability();
-            if (grid.x * grid.y * grid.z > 0) {{
-                {guarded_calls}
-                std::stringstream ss;
-                ss << "[TritonAOT] No implementation found for {func_name}" << {failure_msg};
-                throw std::runtime_error(ss.str());
-            }}
-        }}
-    """
+void {func_name}(
+    {params}) {{
+  auto cc = compute_capability();
+  if (grid.x * grid.y * grid.z > 0) {{
+{guarded_calls}
+    std::stringstream ss;
+    ss << "[TritonAOT] No implementation found for {func_name}"
+{failure_msg};
+    throw std::runtime_error(ss.str());
+  }}
+}}
+"""
 
 _TORCH_OP_TMPL = """
-        namespace {{
-        triton::aot::gridDims dims_from_vec(
-            const std::vector<int64_t>& grid
-        ) {{
-          return triton::aot::gridDims(
-              grid.size() > 0 ? grid[0] : 1,
-              grid.size() > 1 ? grid[1] : 1,
-              grid.size() > 2 ? grid[2] : 1
-          );
-        }}
+namespace {{
+triton::aot::gridDims dims_from_vec(
+    const std::vector<int64_t>& grid
+) {{
+  return triton::aot::gridDims(
+      grid.size() > 0 ? grid[0] : 1,
+      grid.size() > 1 ? grid[1] : 1,
+      grid.size() > 2 ? grid[2] : 1
+  );
+}}
 
-        {type_comment}void {func_name}_op(
-            std::vector<int64_t> grid,
-            {cpp_params}
-        ) {{
-            triton::aot::{func_name}(
-                dims_from_vec(grid),
-                {args}
-            );
-        }}
+{type_comment}void {func_name}_op(
+    std::vector<int64_t> grid,
+    {cpp_params}
+) {{
+  triton::aot::{func_name}(
+      dims_from_vec(grid),
+      {args}
+  );
+}}
 
-        void {func_name}_dummy_op(
-            std::vector<int64_t> grid,
-            {cpp_params}
-        ) {{
-            // Do nothing.  The op is a dummy for model transform,
-            // processing, and splitting services.
-        }}
-        }}
+void {func_name}_dummy_op(
+    std::vector<int64_t> grid,
+    {cpp_params}
+) {{
+  // Do nothing.  The op is a dummy for model transform,
+  // processing, and splitting services.
+}}
+}}
 
-        STABLE_TORCH_LIBRARY_FRAGMENT(triton_aot, m) {{
-          m.def("{schema}");
-        }}
-        STABLE_TORCH_LIBRARY_IMPL(triton_aot, CUDA, m) {{
-          m.impl("{func_name}", TORCH_BOX(&{func_name}_op));
-        }}
+STABLE_TORCH_LIBRARY_FRAGMENT(triton_aot, m) {{
+  m.def(
+      {schema_literals});
+}}
+STABLE_TORCH_LIBRARY_IMPL(triton_aot, CUDA, m) {{
+  m.impl("{func_name}", TORCH_BOX(&{func_name}_op));
+}}
 
-        STABLE_TORCH_LIBRARY_IMPL(triton_aot, CPU, m) {{
-          m.impl("{func_name}", TORCH_BOX(&{func_name}_dummy_op));
-        }}
+STABLE_TORCH_LIBRARY_IMPL(triton_aot, CPU, m) {{
+  m.impl("{func_name}", TORCH_BOX(&{func_name}_dummy_op));
+}}
 
-        STABLE_TORCH_LIBRARY_IMPL(triton_aot, Meta, m) {{
-          m.impl("{func_name}", TORCH_BOX(&{func_name}_dummy_op));
-        }}
-        """
+STABLE_TORCH_LIBRARY_IMPL(triton_aot, Meta, m) {{
+  m.impl("{func_name}", TORCH_BOX(&{func_name}_dummy_op));
+}}
+"""
 
-_META_PY_TMPL = """
-    def {meta_func_name}({in_args}):
-        {returns_comment}
-        {guards}
-        {tail}
-    """
+# Python, so 4-space body -- the C++ constants above are the ones that follow
+# clang-format.
+_META_PY_TMPL = """\
+def {meta_func_name}({in_args}):
+    {returns_comment}
+    {guards}
+    {tail}
+"""
 
 _META_CPP_TMPL = """
-    inline std::tuple<{return_type}> {meta}({in_args}) {{
-        {guards}
-        {tail}
-    }}
-    """
+inline std::tuple<{return_type}> {meta}({in_args}) {{
+  {guards}
+  {tail}
+}}
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -251,10 +290,8 @@ def gen_cubin(kernel_name: str, kernel: Any, install_dir: str, backend: str) -> 
 def gen_loader(kernel_name: str, cubin_name: str, shared: int) -> str:
     # TODO(changpan): Extract inline cuModuleLoadData/cuModuleGetFunction error
     # handling into a shared helper to reduce generated code size.
-    return textwrap.dedent(
-        _LOADER_TMPL.format(
-            kernel_name=kernel_name, cubin_name=cubin_name, shared=shared
-        )
+    return _LOADER_TMPL.format(
+        kernel_name=kernel_name, cubin_name=cubin_name, shared=shared
     )
 
 
@@ -266,12 +303,14 @@ def gen_loader(kernel_name: str, cubin_name: str, shared: int) -> str:
 def gen_launcher_params(
     descriptors: list[ArgDescriptor],
     signature: dict[int, str],
+    indent: int = 0,
 ) -> str:
     args = ["gridDims grid"]
     for d in descriptors:
         if d.index in signature:
             args.append(d.launcher_param(signature[d.index]))
-    return ", ".join(args)
+    sep = ",\n" + " " * indent if indent else ", "
+    return sep.join(args)
 
 
 def gen_launch_args(
@@ -328,7 +367,8 @@ def _gen_launch_call(
         "_launch_config.numAttrs = 1;",
         "auto res = cuLaunchKernelEx(&_launch_config, func, args, NULL);",
     ]
-    return "\n            ".join(lines)
+    # Joined at the column gen_launcher interpolates this at.
+    return ("\n" + " " * _INDENT).join(lines)
 
 
 def _launch_header_available() -> bool:
@@ -376,7 +416,7 @@ def gen_launcher(
             for line in launcher_src.splitlines()
             if not line.strip().startswith("#include")
         )
-        params = gen_launcher_params(descriptors, spec.signature)
+        params = gen_launcher_params(descriptors, spec.signature, indent=_CONT)
 
         # Scratch is NOT part of the args struct: the launch.h ABI passes
         # global_scratch / profile_scratch as separate trailing params of
@@ -395,7 +435,11 @@ def gen_launcher(
                 struct_fields.append(f"(CUdeviceptr){arg}")
             else:
                 struct_fields.append(arg)
-        struct_init = ", ".join(struct_fields)
+        struct_init = (",\n" + " " * (_INDENT + _CONT)).join(struct_fields)
+        # See the legacy path below: compat.py joins these at its own indent.
+        scratch_declarations = ("\n" + " " * _INDENT).join(
+            line.strip() for line in scratch_declarations.splitlines()
+        )
 
         # Extract the safe name used in the launcher_src for the args struct/function
         metadata_name = kernel.metadata.name
@@ -404,37 +448,38 @@ def gen_launcher(
         return (
             "\n"
             + launcher_src
-            + textwrap.dedent(
-                _LAUNCHER_FAST_TMPL.format(
-                    kernel_name=kernel_name,
-                    params=params,
-                    scratch_declarations=scratch_declarations,
-                    safe_name=safe_name,
-                    struct_init=struct_init,
-                )
+            + _LAUNCHER_FAST_TMPL.format(
+                kernel_name=kernel_name,
+                params=params,
+                scratch_declarations=scratch_declarations,
+                safe_name=safe_name,
+                struct_init=struct_init,
             )
         )
 
     # Fallback: original path (cuLaunchKernel, no cluster/PDL support)
-    params = gen_launcher_params(descriptors, spec.signature)
+    params = gen_launcher_params(descriptors, spec.signature, indent=_CONT)
     args = gen_launch_args(func, spec)
 
     scratch_declarations, scratch_args = get_scratch_parameters(kernel, backend)
     args.extend(scratch_args)
 
-    args_str = ", ".join(args)
+    # compat.py is shared with tritoncc and joins these at its own indent;
+    # re-join at ours rather than depend on that constant.
+    scratch_declarations = ("\n" + " " * _INDENT).join(
+        line.strip() for line in scratch_declarations.splitlines()
+    )
+    args_str = (",\n" + " " * (_INDENT + _CONT)).join(args)
     launch_call = _gen_launch_call(
         kernel, backend, shared, warp_size, spec.autotune.num_warps
     )
 
-    return textwrap.dedent(
-        _LAUNCHER_LEGACY_TMPL.format(
-            kernel_name=kernel_name,
-            params=params,
-            scratch_declarations=scratch_declarations,
-            args_str=args_str,
-            launch_call=launch_call,
-        )
+    return _LAUNCHER_LEGACY_TMPL.format(
+        kernel_name=kernel_name,
+        params=params,
+        scratch_declarations=scratch_declarations,
+        args_str=args_str,
+        launch_call=launch_call,
     )
 
 
@@ -448,11 +493,15 @@ def gen_selector_params(
     autotune_fields: tuple[Field[Any], ...],
     *,
     with_defaults: bool = False,
+    indent: int = 0,
 ) -> str:
     """Generate C++ selector function parameter list.
 
     If ``with_defaults`` is True, autotune-field params are emitted as
     ``T name=<default>`` (used by ``gen_selector_proto``).
+
+    ``indent`` puts one parameter per line, continuation lines padded to that
+    column.
     """
     args = ["gridDims grid"]
     args.extend(d.selector_param() for d in descriptors)
@@ -470,12 +519,14 @@ def gen_selector_params(
         else:
             suffix = ""
         args.append(f"{py_types[f.name].__name__} {f.name}{suffix}")
-    return ", ".join(args)
+    sep = ",\n" + " " * indent if indent else ", "
+    return sep.join(args)
 
 
 def gen_launcher_call_args(
     descriptors: list[ArgDescriptor],
     signature: dict[int, str],
+    indent: int = 0,
 ) -> str:
     args = ["grid"]
     for d in descriptors:
@@ -486,7 +537,8 @@ def gen_launcher_call_args(
                 args.append(f"static_cast<{CTYPES[signature[d.index]]}>({d.name})")
             else:
                 args.append(d.name)
-    return ", ".join(args)
+    sep = ",\n" + " " * indent if indent else ", "
+    return sep.join(args)
 
 
 @dataclass(frozen=True)
@@ -502,7 +554,7 @@ class Guard:
     cond: str
 
     def render(self) -> str:
-        return f"if ({self.cond}) "
+        return f"if ({self.cond})"
 
 
 def _dtype_guards(
@@ -619,6 +671,12 @@ def spec_guards(
     ]
 
 
+# Columns inside the text ``gen_guarded_calls`` returns. ``gen_selector``
+# splices that block into ``_SELECTOR_TMPL``'s ``if`` body, so these are
+# relative to it and stay correct wherever the template puts the block.
+_CALL_ARG_INDENT = _INDENT + _CONT
+
+
 def gen_guarded_calls(
     func: JITFunction[list[Any]],
     unit: OpsUnit,
@@ -629,12 +687,17 @@ def gen_guarded_calls(
     calls = []
     for spec in unit.specs:
         kernel_name = gen_kernel_name(func, spec, unit.cc, autotune_fields)
-        args = gen_launcher_call_args(descriptors, spec.signature)
-        guards = "".join(
-            g.render() for g in spec_guards(spec, desc_by_idx, autotune_fields)
+        args = gen_launcher_call_args(
+            descriptors, spec.signature, indent=_CALL_ARG_INDENT
         )
-        calls.append(f"{guards}return {kernel_name}({args});\n")
-    return "".join(calls)
+        lines = [g.render() for g in spec_guards(spec, desc_by_idx, autotune_fields)]
+        # Built as a list so a spec with no guards emits a bare return rather
+        # than a leading blank line.
+        lines.append(
+            f"{' ' * _INDENT}return {kernel_name}(\n{' ' * _CALL_ARG_INDENT}{args});"
+        )
+        calls.append("\n".join(lines) + "\n")
+    return "\n".join(calls)
 
 
 def gen_selector_proto(
@@ -642,8 +705,12 @@ def gen_selector_proto(
     func_name: str,
     autotune_fields: tuple[Field[Any], ...],
 ) -> str:
-    params = gen_selector_params(descriptors, autotune_fields, with_defaults=True)
-    return f"void {func_name}({params});"
+    params = gen_selector_params(
+        descriptors, autotune_fields, with_defaults=True, indent=_CONT
+    )
+    # Trailing newline so the template's __TRITON_AOT_GENERATE_END__ marker,
+    # which follows directly, starts its own line.
+    return f"void {func_name}(\n    {params});\n"
 
 
 def gen_failure_msg(
@@ -671,8 +738,11 @@ def gen_failure_msg(
                 f" && (((uintptr_t){d.name}.value().data_ptr()) % 16) == 0)"
                 f' ? "true" : "false")'
             )
+            # Split across lines: the two ternaries make a single-line entry
+            # roughly 230 characters wide.
             tensors.append(
-                f'" {d.name}=" << {dtype_expr} << "(aligned16=" << {align_expr} << ")"'
+                f'" {d.name}="\n<< {dtype_expr}\n<< "(aligned16="'
+                f'\n<< {align_expr}\n<< ")"'
             )
         elif isinstance(d, ScalarArg):
             scalars.append(f'" {d.name}=" << {d.name}')
@@ -681,17 +751,20 @@ def gen_failure_msg(
 
     autotune: list[str] = [f'" {f.name}=" << {f.name}' for f in autotune_fields]
 
+    # One operand per line -- this is what you read when dispatch fails.
+    join = "\n<< "
+
     sections: list[str] = []
     if tensors:
-        sections.append('"\\n  Tensors:" << ' + " << ".join(tensors))
+        sections.append('"\\n  Tensors:"' + join + join.join(tensors))
     if scalars:
-        sections.append('"\\n  Scalars:" << ' + " << ".join(scalars))
+        sections.append('"\\n  Scalars:"' + join + join.join(scalars))
     if constants:
-        sections.append('"\\n  Constants:" << ' + " << ".join(constants))
-    sections.append('"\\n  Autotune:" << ' + " << ".join(autotune))
+        sections.append('"\\n  Constants:"' + join + join.join(constants))
+    sections.append('"\\n  Autotune:"' + join + join.join(autotune))
     sections.append('"\\n  Device: cc=" << cc')
 
-    return " << ".join(sections)
+    return join.join(sections)
 
 
 def gen_selector(
@@ -700,14 +773,16 @@ def gen_selector(
     descriptors: list[ArgDescriptor],
     autotune_fields: tuple[Field[Any], ...],
 ) -> str:
-    params = gen_selector_params(descriptors, autotune_fields)
+    params = gen_selector_params(descriptors, autotune_fields, indent=_CONT)
     guarded_calls = gen_guarded_calls(func, unit, descriptors, autotune_fields)
     failure_msg = gen_failure_msg(descriptors, autotune_fields)
     return _SELECTOR_TMPL.format(
         func_name=func.__name__,
         params=params,
-        guarded_calls=guarded_calls,
-        failure_msg=failure_msg,
+        # Both land in _SELECTOR_TMPL's `if` body: one level for the
+        # function body, one for the `if`.
+        guarded_calls=textwrap.indent(guarded_calls, " " * (2 * _INDENT)),
+        failure_msg=textwrap.indent("<< " + failure_msg, " " * (2 * _INDENT)),
     )
 
 
@@ -716,15 +791,43 @@ def gen_selector(
 # ---------------------------------------------------------------------------
 
 
+def _as_cpp_string_literals(text: str, indent: int, width: int = 72) -> str:
+    """Render *text* as adjacent C++ string literals, one per line.
+
+    The compiler concatenates them, and chunks keep their separators, so the
+    value is unchanged. A chunk ending in an odd number of backslashes would
+    escape its closing quote -- safe here because schema backslashes come from
+    ``gen_str_wrap``'s ``\\"``, always followed by a quote, never by ``", "``.
+    """
+    parts = text.split(", ")
+    chunks = [p + ", " for p in parts[:-1]] + parts[-1:]
+
+    lines: list[str] = []
+    current = ""
+    for chunk in chunks:
+        if current and len(current) + len(chunk) > width:
+            lines.append(current)
+            current = chunk
+        else:
+            current += chunk
+    if current:
+        lines.append(current)
+
+    return ("\n" + " " * indent).join(f'"{line}"' for line in lines)
+
+
 def gen_cpp_op_params(
     descriptors: list[ArgDescriptor],
     autotune_fields: tuple[Field[Any], ...],
+    indent: int = 0,
 ) -> str:
+    """Comma-joined C++ parameter list; ``indent`` puts one per line."""
     args = [d.cpp_op_param() for d in descriptors]
     py_types = AutotuneAttrs.field_python_types()
     for f in autotune_fields:
         args.append(f"{PY_TYPES_TO_CPP_TYPES[py_types[f.name]]} {f.name}")
-    return ", ".join(args)
+    sep = ",\n" + " " * indent if indent else ", "
+    return sep.join(args)
 
 
 def gen_torch_op_params(
@@ -765,9 +868,10 @@ def gen_torch_op(
     default_values: dict[str, Any],
     autotune_fields: tuple[Field[Any], ...],
 ) -> str:
-    cpp_params = gen_cpp_op_params(descriptors, autotune_fields)
+    cpp_params = gen_cpp_op_params(descriptors, autotune_fields, indent=_CONT)
     arg_names = list(func.arg_names) + [f.name for f in autotune_fields]
-    args = ", ".join(arg_names)
+    args = (",\n" + " " * (_INDENT + _CONT)).join(arg_names)
+    schema = gen_torch_op_schema(func, descriptors, default_values, autotune_fields)
 
     # Generate a comment noting which tensor params are non-optional but
     # promoted to Tensor? for TorchScript compatibility.
@@ -781,15 +885,12 @@ def gen_torch_op(
             "for TorchScript compatibility.\n"
             "// Dispatch uses HAS_XXX constexpr ints, not tensor presence.\n"
         )
-    schema = gen_torch_op_schema(func, descriptors, default_values, autotune_fields)
-    return textwrap.dedent(
-        _TORCH_OP_TMPL.format(
-            type_comment=type_comment,
-            func_name=func.__name__,
-            cpp_params=cpp_params,
-            args=args,
-            schema=schema,
-        )
+    return _TORCH_OP_TMPL.format(
+        type_comment=type_comment,
+        func_name=func.__name__,
+        cpp_params=cpp_params,
+        args=args,
+        schema_literals=_as_cpp_string_literals(schema, indent=_INDENT + _CONT),
     )
 
 
@@ -874,7 +975,7 @@ def gen_tuner_meta_py(
     name = unwrap_to_jit(func).__name__
     meta_func_name = name + "_meta"
 
-    guards = "\n        ".join(guard_list)
+    guards = "\n    ".join(guard_list)
 
     fmt_args = ", ".join([f"{{{arg_name}}}" for arg_name in arg_names])
 
@@ -885,14 +986,12 @@ def gen_tuner_meta_py(
 
     returns_comment = f"# Returns: ({', '.join(return_names)})"
 
-    return generated_header("#") + textwrap.dedent(
-        _META_PY_TMPL.format(
-            meta_func_name=meta_func_name,
-            in_args=in_args,
-            returns_comment=returns_comment,
-            guards=guards,
-            tail=fallback_str if tuner_fallback else raise_runtime_error_str,
-        )
+    return generated_header("#") + _META_PY_TMPL.format(
+        meta_func_name=meta_func_name,
+        in_args=in_args,
+        returns_comment=returns_comment,
+        guards=guards,
+        tail=fallback_str if tuner_fallback else raise_runtime_error_str,
     )
 
 
@@ -931,7 +1030,7 @@ def gen_tuner_meta_cpp(
             else:
                 equations.append(f"{arg} == {value}")
         guard_list.append(f"if ({' && '.join(equations)}) return std::make_tuple{val};")
-    guards = "\n        ".join(guard_list)
+    guards = ("\n" + " " * _INDENT).join(guard_list)
     name = unwrap_to_jit(func).__name__
     meta = name + "_meta"
     fmt_args = ", ".join([f"{arg_name}" for arg_name in arg_names])
@@ -939,14 +1038,12 @@ def gen_tuner_meta_cpp(
     fallback_str = f"""return std::make_tuple{Counter(vals).most_common(1)[0][0]};"""
     # Infer the return type from the actual values
     return_type = _infer_return_type(vals[0])
-    return textwrap.dedent(
-        _META_CPP_TMPL.format(
-            return_type=return_type,
-            meta=meta,
-            in_args=in_args,
-            guards=guards,
-            tail=fallback_str if tuner_fallback else raise_runtime_error_str,
-        )
+    return _META_CPP_TMPL.format(
+        return_type=return_type,
+        meta=meta,
+        in_args=in_args,
+        guards=guards,
+        tail=fallback_str if tuner_fallback else raise_runtime_error_str,
     )
 
 
