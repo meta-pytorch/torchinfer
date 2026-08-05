@@ -16,6 +16,7 @@ import inspect
 import os
 from typing import Any, Callable, Optional, Protocol
 
+from aot_tensor.constants import generated_header
 from aot_tensor.transform.import_utils import (
     get_original_import_header,
     rewrite_package_imports,
@@ -239,6 +240,7 @@ def generate_wrapper_files_skeleton(
     import_header = get_original_import_header(module_code)
 
     with open(os.path.join(output_dir, f"{fn_name}_original.py"), "w") as f:
+        f.write(generated_header("#"))
         f.write(import_header)
         f.write(wrapper_code)
 
@@ -255,5 +257,6 @@ def generate_wrapper_files_skeleton(
     tree = transformer.visit(tree)
 
     with open(os.path.join(output_dir, f"{fn_name}_wrapper.py"), "w") as f:
+        f.write(generated_header("#"))
         f.write(import_header)
         f.write(ast.unparse(tree))

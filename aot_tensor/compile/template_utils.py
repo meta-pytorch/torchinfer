@@ -14,6 +14,8 @@ from collections import Counter
 from dataclasses import dataclass
 from importlib import resources
 
+from aot_tensor.constants import generated_header
+
 
 def render_template(
     template: str,
@@ -88,8 +90,15 @@ class TemplateSet:
         return resources.files(self.package).joinpath(name).read_text()
 
     def render(self, name: str, replacements: dict[str, str]) -> str:
-        """Load ``name`` and fill its ``// __<tag>_GENERATE_*__`` regions."""
-        return render_template(self.load(name), replacements, self.tag)
+        """Load ``name`` and fill its ``// __<tag>_GENERATE_*__`` regions.
+
+        The generated-file header is added here rather than in the templates,
+        which are hand-written and should stay linted. Output is therefore a
+        whole file, not a fragment to embed in one.
+        """
+        return generated_header("//") + render_template(
+            self.load(name), replacements, self.tag
+        )
 
 
 TRITON_TEMPLATES: TemplateSet = TemplateSet(

@@ -32,6 +32,7 @@ from aot_tensor.compile.triton.compat import _get_cluster_dims, get_scratch_para
 from aot_tensor.compile.triton.launch_header import find_launch_header
 from aot_tensor.compile.triton.spec_processing import AutotuneAttrs, KernelSpec, OpsUnit
 from aot_tensor.compile.triton.utils import hash_kernel_name, unwrap_to_jit
+from aot_tensor.constants import generated_header
 from triton.runtime.jit import JITFunction
 
 # ---------------------------------------------------------------------------
@@ -817,7 +818,7 @@ def gen_tuner_meta_py(
 
     returns_comment = f"# Returns: ({', '.join(return_names)})"
 
-    return textwrap.dedent(
+    return generated_header("#") + textwrap.dedent(
         f"""
     def {meta_func_name}({in_args}):
         {returns_comment}

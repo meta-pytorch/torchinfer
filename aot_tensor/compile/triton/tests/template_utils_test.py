@@ -7,6 +7,7 @@ import unittest
 from typing import Dict
 
 from aot_tensor.compile.template_utils import render_template, TRITON_TEMPLATES
+from aot_tensor.constants import GENERATED_TOKEN
 from parameterized import parameterized
 
 
@@ -50,6 +51,18 @@ class TemplateUtilsTest(unittest.TestCase):
         template = TRITON_TEMPLATES.load(name)
         for s in expected:
             self.assertIn(s, template)
+
+    def test_render_marks_output_as_generated(self) -> None:
+        """Only ``render`` adds the marker; ``load`` returns the template as-is,
+        which is what keeps the hand-written templates linted."""
+        rendered = TRITON_TEMPLATES.render(
+            "kernel.h", {"TUNER_META_CPP": "", "SELECTOR_PROTO": ""}
+        )
+        self.assertTrue(
+            rendered.startswith(f"// {GENERATED_TOKEN}"),
+            f"expected the generated marker first, got: {rendered[:60]!r}",
+        )
+        self.assertNotIn(GENERATED_TOKEN, TRITON_TEMPLATES.load("kernel.h"))
 
     @parameterized.expand([("TRITON_AOT",), ("CUTEDSL_AOT",)])
     def test_render_template_replaces_block(self, tag: str) -> None:
