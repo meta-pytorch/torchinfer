@@ -3,7 +3,7 @@
 
 import importlib
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from types import ModuleType, TracebackType
 from typing import Any, Callable, Optional, Type
 
@@ -54,11 +54,23 @@ assert set(_SPEC_COLLECTORS) == set(ALL_MARKERS), (
 )
 
 
-def enable_spec_collection() -> None:
+def enable_spec_collection(
+    overrides: Optional[Mapping[type[AOTTMarker], SpecCollector]] = None,
+) -> None:
     """Start AOT spec collection: register each marker's collector so marker calls
     forward to the owning DSL's ``collect``. No upfront registry needed.
+
+    ``overrides`` remaps individual markers to a caller-supplied collector
+    (e.g. one that routes compile to a custom adapter). Keys must be known
+    markers: ``disable_spec_collection`` iterates ``ALL_MARKERS``, so an
+    unknown marker's collector would never be cleared.
     """
-    for marker, collector in _SPEC_COLLECTORS.items():
+    if overrides:
+        unknown = set(overrides) - set(ALL_MARKERS)
+        if unknown:
+            raise ValueError(f"spec-collector overrides for unknown markers: {unknown}")
+    merged = {**_SPEC_COLLECTORS, **(overrides or {})}
+    for marker, collector in merged.items():
         marker.set_spec_collector(collector)
 
 
@@ -81,12 +93,17 @@ class AOTTCompileSession:
     - dsl_config: flat list of per-DSL ``DslCompileConfig``, opaque to the session
       -- each DSL finds its own by type via ``ctx.find_config`` (e.g. Triton's
       autotune-cache override path).
+    - spec_collector_overrides: optional marker -> collector remap forwarded to
+      ``enable_spec_collection`` (route a marker's compile to a custom adapter).
     """
 
     def __init__(
         self,
         package_importer: Optional[package.PackageImporter] = None,
         dsl_config: Optional[Sequence[DslCompileConfig]] = None,
+        spec_collector_overrides: Optional[
+            Mapping[type[AOTTMarker], SpecCollector]
+        ] = None,
     ) -> None:
         self._import_module: Callable[[str], ModuleType] = (
             package_importer.import_module
@@ -94,11 +111,14 @@ class AOTTCompileSession:
             else importlib.import_module
         )
         self._dsl_config: Sequence[DslCompileConfig] = dsl_config or ()
+        self._spec_collector_overrides: Optional[
+            Mapping[type[AOTTMarker], SpecCollector]
+        ] = spec_collector_overrides
 
     def __enter__(self) -> None:
         state = get_aott_compile_state()
         state.reset()
-        enable_spec_collection()
+        enable_spec_collection(self._spec_collector_overrides)
         logger.info(f"Start AOTT compile, output dir: {get_aott_compile_path()}")
 
     def __exit__(

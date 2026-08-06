@@ -15,6 +15,7 @@ from aot_tensor.compile.compile_state import (
     get_aott_compile_state,
     is_aott_compile_enabled,
 )
+from aot_tensor.types import AOTTMarker, CuTeAOT, TritonAOT
 
 
 class SpecCollectionTest(unittest.TestCase):
@@ -39,6 +40,32 @@ class SpecCollectionTest(unittest.TestCase):
 
         disable_spec_collection()
         self.assertFalse(is_aott_compile_enabled())
+
+    def test_override_remaps_only_the_given_marker(self) -> None:
+        def custom_collector(marker: Any, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        enable_spec_collection({TritonAOT: custom_collector})
+
+        # The overridden marker got the custom collector; others kept the
+        # default wiring.
+        self.assertIs(TritonAOT.spec_collector, custom_collector)
+        self.assertIsNotNone(CuTeAOT.spec_collector)
+        self.assertIsNot(CuTeAOT.spec_collector, custom_collector)
+
+        # disable_spec_collection clears overridden collectors too.
+        disable_spec_collection()
+        self.assertIsNone(TritonAOT.spec_collector)
+
+    def test_override_rejects_unknown_marker(self) -> None:
+        class NotAMarker(AOTTMarker):
+            pass
+
+        def custom_collector(marker: Any, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        with self.assertRaises(ValueError):
+            enable_spec_collection({NotAMarker: custom_collector})
 
 
 class _RecordingAdapter(AOTTAdapter[Any]):
@@ -98,6 +125,18 @@ class CompileSessionTest(unittest.TestCase):
         self.assertEqual(len(adapter.contexts), 1)
         self.assertIsInstance(adapter.contexts[0], CompileContext)
         # ...and cleared collection.
+        self.assertFalse(is_aott_compile_enabled())
+
+    def test_session_forwards_spec_collector_overrides(self) -> None:
+        def custom_collector(marker: Any, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        with AOTTCompileSession(spec_collector_overrides={TritonAOT: custom_collector}):
+            self.assertIs(TritonAOT.spec_collector, custom_collector)
+            self.assertIsNotNone(CuTeAOT.spec_collector)
+
+        # __exit__ cleared the overridden collector along with the defaults.
+        self.assertIsNone(TritonAOT.spec_collector)
         self.assertFalse(is_aott_compile_enabled())
 
     def test_exit_skips_compile_when_body_raises(self) -> None:
