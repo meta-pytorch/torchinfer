@@ -53,7 +53,7 @@ class AOTTCompileStateTest(_ResetStateTest):
         # Simulate an active compile: a registered collector + a collected kernel.
         TritonAOT.set_spec_collector(lambda *args, **kwargs: None)
         store = DslSpecStore(dsl=MagicMock())
-        store.kernels[MagicMock()] = MagicMock()  # pyre-ignore[6]: test stub
+        store.kernels[MagicMock()] = MagicMock()
         state.dsl_state["triton"] = store
 
         state.reset()

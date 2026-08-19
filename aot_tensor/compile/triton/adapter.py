@@ -581,7 +581,6 @@ class TritonAOTOperatorTransform(ast.NodeTransformer):
         if self._kernel_autotuner is not None:
             autotune_key_id: Dict[str, int] = {}
             self._autotune_key_id = autotune_key_id
-            # pyre-ignore[16]: JITFunction has arg_names at runtime
             for key in self._kernel_autotuner.keys:
                 autotune_key_id[key] = self._kernel_jit_fn.arg_names.index(key)
 
@@ -711,7 +710,6 @@ class TritonAOTOperatorTransform(ast.NodeTransformer):
                 if self._kernel_autotuner is not None:
                     autotune_key_map: Dict[str, ast.expr] = {}
                     self._autotune_key_map = autotune_key_map
-                    # pyre-ignore[16]: Autotuner has keys at runtime
                     for key in self._kernel_autotuner.keys:
                         # Prefer kwargs: ``kernel[grid](.., N=N_expr, ..)``.
                         found_key = False

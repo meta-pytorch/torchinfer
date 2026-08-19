@@ -75,7 +75,6 @@ def another_func():
         parsed = ast.parse(result)
         self.assertEqual(len(parsed.body), 1)
         self.assertIsInstance(parsed.body[0], ast.FunctionDef)
-        # pyre-ignore[16]: Pyre doesn't know about FunctionDef.name
         self.assertEqual(parsed.body[0].name, "target_func")
 
     def test_raises_error_for_nonexistent_function(self) -> None:

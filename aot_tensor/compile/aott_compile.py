@@ -27,7 +27,7 @@ logger: logging.Logger = logging.getLogger(__name__)
 def _triton_spec_collector(marker: TritonAOT, *args: Any, **kwargs: Any) -> None:
     """Forward a Triton marker call to the Triton plugin's ``collect``. Lazy
     import so this module never statically depends on the DSL (no cycle)."""
-    from aot_tensor.compile.triton.adapter import collect  # @manual  # pyre-ignore[21]
+    from aot_tensor.compile.triton.adapter import collect  # @manual
 
     collect(marker, *args, **kwargs)
 
