@@ -8,7 +8,7 @@ the PyTorch build configuration.
 """
 
 import torch
-from aot_tensor.build.extension_builder_base import ExtensionBuildConfig
+from aot_tensor.build.extension_build_config import ExtensionBuildConfig
 from aot_tensor.build.triton.amd_extension_builder import AmdExtensionBuilder
 from aot_tensor.build.triton.nvidia_extension_builder import NvidiaExtensionBuilder
 

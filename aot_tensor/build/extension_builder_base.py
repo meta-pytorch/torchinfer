@@ -13,8 +13,8 @@ CuTeDSL builder (both are CUDA-only). AMD/HIP and the Triton cubin-embedding
 import abc
 import logging
 import os
-from dataclasses import dataclass
 
+from aot_tensor.build.extension_build_config import ExtensionBuildConfig
 from setuptools.command.build_ext import build_ext
 from torch.utils import cpp_extension
 from torch.utils.cpp_extension import CUDA_HOME
@@ -36,21 +36,6 @@ DEFAULT_SYSTEM_CUDA_HOME: str = "/usr/local/cuda"
 # TODO make configurable (D106571707) and when changing sync StableAbiCheckTest,
 # KNOWN_POST_BASELINE_BOXING_SHIMS etc
 TORCH_TARGET_VERSION: str = "0x020C000000000000"  # 2.12.0, newest is 2.13
-
-
-@dataclass(frozen=True)
-class ExtensionBuildConfig:
-    """Optional environment overrides for extension compilation.
-
-    ``extra_torch_include_dirs`` contains roots searched for Torch API headers.
-    ``extra_aten_src_dirs`` contains exact ATen source include directories used
-    by AMD builds.
-    """
-
-    compiler_path: str | None = None
-    extra_torch_include_dirs: tuple[str, ...] = ()
-    extra_aten_src_dirs: tuple[str, ...] = ()
-    extra_gpu_library_dirs: tuple[str, ...] = ()
 
 
 class SoBuildExtension(build_ext):
@@ -111,7 +96,6 @@ class ExtensionBuilder(abc.ABC):
         source_dir: str,
         kernel_name: str,
         output_dir: str = "/tmp",
-        gpu_toolkit_path: str | None = None,
         build_config: ExtensionBuildConfig | None = None,
     ) -> None:
         """
@@ -121,21 +105,19 @@ class ExtensionBuilder(abc.ABC):
             source_dir: Directory containing the generated C++ sources and cubin/hsaco files.
             kernel_name: Name of the kernel (e.g., "_addmm_fwd").
             output_dir: Directory to place the built .so file.
-            gpu_toolkit_path: Path to GPU toolkit. Defaults to the subclass's
-                ``_default_gpu_toolkit_path()`` (e.g. CUDA_HOME / ROCM_HOME).
             build_config: Optional extension-build overrides for the compiler
-                executable, Torch include roots, ATen source include directories,
-                and GPU library directories.
+                executable, GPU toolkit root, Torch include roots, and GPU
+                library directories.
         """
         self.source_dir = source_dir
         self.kernel_name = kernel_name
         self.output_dir = output_dir
         self.ext_name = kernel_name.lstrip("_")
         self.build_config = build_config or ExtensionBuildConfig()
-        if gpu_toolkit_path is None:
+        if self.build_config.gpu_toolkit_path is None:
             self.gpu_toolkit_path = self._default_gpu_toolkit_path()
         else:
-            self.gpu_toolkit_path = gpu_toolkit_path
+            self.gpu_toolkit_path = self.build_config.gpu_toolkit_path
 
         if not os.path.exists(self.gpu_toolkit_path):
             raise RuntimeError(f"GPU toolkit not found at {self.gpu_toolkit_path}. ")

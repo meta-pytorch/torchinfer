@@ -64,6 +64,7 @@ class AmdExtensionBuilder(NvidiaExtensionBuilder):
         Return directories containing HIP libraries (libamdhip64.so).
         """
         candidates = [
+            *self.build_config.extra_gpu_library_dirs,
             os.path.join(self.gpu_toolkit_path, "lib"),
             os.path.join(self.gpu_toolkit_path, "lib64"),
             os.path.join(self.gpu_toolkit_path, "hip", "lib"),
@@ -105,27 +106,3 @@ class AmdExtensionBuilder(NvidiaExtensionBuilder):
     def get_torch_device_type(self) -> str:
         """Return the torch device type for include path lookup."""
         return "hip"
-
-    def get_torch_include_dirs(self) -> list[str]:
-        """
-        Return torch include directories for C++ extension compilation.
-
-        For AMD/HIP builds, also adds configured ATen source paths.
-        """
-        include_dirs = super().get_torch_include_dirs()
-
-        # ATen-hip-headers exports native HIP impl headers (like Masquerading headers)
-        # under aten/src/ATen/hip/impl/, but the hipified HIPContext.h includes them
-        # as <ATen/hip/impl/...>. Adding aten/src resolves this path mismatch.
-        aten_src_dirs = self.build_config.extra_aten_src_dirs
-        if not aten_src_dirs:
-            aten_src_dirs = tuple(
-                os.path.join(include_root, "aten", "src")
-                for include_root in self.build_config.extra_torch_include_dirs
-            )
-
-        for aten_src_dir in aten_src_dirs:
-            if os.path.isdir(aten_src_dir) and aten_src_dir not in include_dirs:
-                include_dirs.append(aten_src_dir)
-
-        return include_dirs
