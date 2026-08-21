@@ -42,6 +42,7 @@ from aot_tensor.compile.triton.codegen import (
     generate_kernel_cpp_content,
     generate_torch_op_content,
     is_non_empty_mapping_of_type,
+    validate_unique_kernel_names,
 )
 from aot_tensor.compile.triton.spec_processing import AutotuneAttrs, KernelSpec, OpsUnit
 from parameterized import parameterized
@@ -732,6 +733,49 @@ class GenKernelNameTest(unittest.TestCase):
         for s in expected_substrings:
             self.assertIn(s, name)
 
+    def test_suffix_marks_use_original_arg_indices_with_folded_args(self) -> None:
+        """The divisibility suffix must track ORIGINAL arg indices (the
+        space the constraint sets live in), not dict position. Real-world
+        repro shape (gemm_pointwise, P2467214344): equal-to-1 strides fold
+        into constants, so positional iteration shifted every later mark
+        onto the wrong arg and dropped marks past the fold boundary --
+        symbol names misdescribed their cubins, and two variant specs
+        differing only in those marks could collide on cubin filename."""
+        spec = KernelSpec(
+            # Args 1 and 2 are folded equal-to-1 strides; marks sit on the
+            # pointer (0) and on scalars AFTER the fold gap (4, 5).
+            signature={0: "*fp16", 3: "i32", 4: "i32", 5: "i32"},
+            constants={1: 1, 2: 1},
+            divisible_by_16={0, 4, 5},
+            divisible_by_8=set(),
+            autotune=AutotuneAttrs(),
+        )
+        name = gen_kernel_name(_addmm_fwd, spec, 90, AutotuneAttrs.fields_for("cuda"))
+        suffix = name.rsplit("_", 1)[-1]
+        # Correct: marks on original indices 0, 4, 5. The positional bug
+        # produced "0d123" (mark shifted to position 0 only, 4/5 dropped).
+        self.assertEqual(suffix, "0d34d5d")
+
+    def test_validate_unique_kernel_names_rejects_collision_pre_compile(
+        self,
+    ) -> None:
+        """The pre-compile validator (runs before compile_specs_parallel,
+        i.e. before any Triton compile cost is paid) rejects two specs
+        mapping to one name; distinct specs pass."""
+        spec = KernelSpec(
+            signature={0: "*fp16", 3: "i32"},
+            constants={1: 1, 2: 1},
+            divisible_by_16={0},
+            divisible_by_8=set(),
+            autotune=AutotuneAttrs(),
+        )
+        fields = AutotuneAttrs.fields_for("cuda")
+        distinct = dataclasses.replace(spec, divisible_by_16={0, 3})
+        # Distinct specs -> distinct names -> no raise.
+        validate_unique_kernel_names(_addmm_fwd, [spec, distinct], 90, fields)
+        with self.assertRaisesRegex(RuntimeError, "kernel name collision"):
+            validate_unique_kernel_names(_addmm_fwd, [spec, spec], 90, fields)
+
     def test_kernel_name_segments_per_backend(self) -> None:
         """Cubin name segments are platform-correct and complete:
         NVIDIA emits ``w/s/cta`` (common + NVIDIA-only); AMD emits
@@ -1043,6 +1087,26 @@ class OptionalTensorCodegenTest(unittest.TestCase):
 
         self.assertIn("!c.has_value()", result)
         self.assertIn("c.has_value()", result)
+
+    def test_guarded_calls_reject_kernel_name_collision(self) -> None:
+        """Kernel names are cubin identity (hash_kernel_name keys the binary
+        files and embedded symbols): two distinct specs mapping to one name
+        would silently alias each other's cubins under the guards, so the
+        codegen must fail loudly instead."""
+
+        @triton.jit
+        def _kernel(a, b, c, D: tl.constexpr) -> None:  # noqa: N802
+            pass
+
+        unit = self._create_optional_unit()
+        # Duplicate the first spec: same signature/constants/marks/autotune
+        # -> identical generated name.
+        unit = dataclasses.replace(unit, specs=[unit.specs[0], unit.specs[0]])
+        descriptors = build_arg_descriptors(_kernel, unit)
+        with self.assertRaisesRegex(RuntimeError, "kernel name collision"):
+            gen_guarded_calls(
+                _kernel, unit, descriptors, AutotuneAttrs.fields_for("cuda")
+            )
 
 
 class TypeMappingTest(unittest.TestCase):

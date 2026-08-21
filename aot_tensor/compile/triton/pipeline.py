@@ -36,6 +36,7 @@ from aot_tensor.compile.triton.codegen import (
     generate_header_content,
     generate_kernel_cpp_content,
     generate_torch_op_content,
+    validate_unique_kernel_names,
 )
 from aot_tensor.compile.triton.spec_processing import (
     AutotuneAttrs,
@@ -251,6 +252,11 @@ def compile_to_cpp(
 
     with open(h_out, "w") as fp:
         fp.write(h_content)
+
+    # Kernel names key the cubin files on disk -- reject collisions before
+    # paying any Triton compile cost (gen_guarded_calls backstops the
+    # post-filter spec set at codegen time).
+    validate_unique_kernel_names(func, unit.specs, gpu_target.arch, autotune_fields)
 
     generated_specs = compile_specs_parallel(
         unit.specs,
