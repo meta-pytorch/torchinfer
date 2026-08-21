@@ -40,10 +40,16 @@ TORCH_TARGET_VERSION: str = "0x020C000000000000"  # 2.12.0, newest is 2.13
 
 @dataclass(frozen=True)
 class ExtensionBuildConfig:
-    """Optional environment overrides for extension compilation."""
+    """Optional environment overrides for extension compilation.
+
+    ``extra_torch_include_dirs`` contains roots searched for Torch API headers.
+    ``extra_aten_src_dirs`` contains exact ATen source include directories used
+    by AMD builds.
+    """
 
     compiler_path: str | None = None
     extra_torch_include_dirs: tuple[str, ...] = ()
+    extra_aten_src_dirs: tuple[str, ...] = ()
     extra_gpu_library_dirs: tuple[str, ...] = ()
 
 
@@ -59,6 +65,12 @@ class SoBuildExtension(build_ext):
 
     Uses setuptools' selected compiler unless an explicit override is supplied.
     """
+
+    # Setuptools rejects script arguments not declared here. Callers omit this
+    # optional flag to keep the compiler selected by setuptools.
+    user_options = build_ext.user_options + [
+        ("compiler-path=", None, "Explicit compiler executable"),
+    ]
 
     compiler_path: str | None
 
@@ -111,7 +123,9 @@ class ExtensionBuilder(abc.ABC):
             output_dir: Directory to place the built .so file.
             gpu_toolkit_path: Path to GPU toolkit. Defaults to the subclass's
                 ``_default_gpu_toolkit_path()`` (e.g. CUDA_HOME / ROCM_HOME).
-            build_config: Optional compiler and torch include-path overrides.
+            build_config: Optional extension-build overrides for the compiler
+                executable, Torch include roots, ATen source include directories,
+                and GPU library directories.
         """
         self.source_dir = source_dir
         self.kernel_name = kernel_name
