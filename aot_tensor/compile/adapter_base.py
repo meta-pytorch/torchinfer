@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from types import ModuleType
 from typing import Any, Callable, cast, Generic, TypeVar
 
+from aot_tensor.build.extension_build_config import ExtensionBuildConfig
 from torch import package
 
 
@@ -83,9 +84,11 @@ class CompileContext:
         compile_path: str,
         import_module: Callable[[str], ModuleType],
         dsl_config: Sequence[DslCompileConfig],
+        extension_build_config: ExtensionBuildConfig | None = None,
     ) -> None:
         self.compile_path = compile_path
         self.import_module = import_module
+        self.extension_build_config = extension_build_config
         # Index by concrete type: at most one config per type.
         self.type_to_config: dict[type[DslCompileConfig], DslCompileConfig] = {}
         for cfg in dsl_config:

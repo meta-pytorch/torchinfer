@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from types import ModuleType, TracebackType
 from typing import Any, Callable, Optional, Type
 
+from aot_tensor.build.extension_build_config import ExtensionBuildConfig
 from aot_tensor.compile.adapter_base import CompileContext, DslCompileConfig
 from aot_tensor.compile.compile_state import (
     get_aott_compile_path,
@@ -93,6 +94,8 @@ class AOTTCompileSession:
     - dsl_config: flat list of per-DSL ``DslCompileConfig``, opaque to the session
       -- each DSL finds its own by type via ``ctx.find_config`` (e.g. Triton's
       autotune-cache override path).
+    - extension_build_config: session-wide extension compiler and include/library
+      configuration. ``None`` leaves each builder on its OSS defaults.
     - spec_collector_overrides: optional marker -> collector remap forwarded to
       ``enable_spec_collection`` (route a marker's compile to a custom adapter).
     """
@@ -101,6 +104,7 @@ class AOTTCompileSession:
         self,
         package_importer: Optional[package.PackageImporter] = None,
         dsl_config: Optional[Sequence[DslCompileConfig]] = None,
+        extension_build_config: Optional[ExtensionBuildConfig] = None,
         spec_collector_overrides: Optional[
             Mapping[type[AOTTMarker], SpecCollector]
         ] = None,
@@ -111,6 +115,7 @@ class AOTTCompileSession:
             else importlib.import_module
         )
         self._dsl_config: Sequence[DslCompileConfig] = dsl_config or ()
+        self._extension_build_config = extension_build_config
         self._spec_collector_overrides: Optional[
             Mapping[type[AOTTMarker], SpecCollector]
         ] = spec_collector_overrides
@@ -135,6 +140,7 @@ class AOTTCompileSession:
                     compile_path=get_aott_compile_path(),
                     import_module=self._import_module,
                     dsl_config=self._dsl_config,
+                    extension_build_config=self._extension_build_config,
                 )
                 for store in get_aott_compile_state().dsl_state.values():
                     store.dsl.compile_and_build(ctx)
