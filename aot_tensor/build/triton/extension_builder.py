@@ -11,6 +11,11 @@ from aot_tensor.build.extension_build_config import ExtensionBuildConfig
 from aot_tensor.build.triton.amd_extension_builder import AmdExtensionBuilder
 from aot_tensor.build.triton.nvidia_extension_builder import NvidiaExtensionBuilder
 
+# Runtime-built extensions require the host's native Torch symbols and bundled
+# headers, neither of which is visible through a normal Python import.
+# @dep=//aot_tensor/fb:runtime_deps
+# @dep=//triton_aot/build:torch_cpp_headers
+
 
 def _is_amd() -> bool:
     return torch.version.hip is not None

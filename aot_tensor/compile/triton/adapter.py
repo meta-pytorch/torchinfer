@@ -17,6 +17,7 @@ import torch
 
 # @manual=//triton:triton
 import triton.language as tl
+from aot_tensor.build.triton.extension_builder import build_triton_aot_extension
 from aot_tensor.compile.adapter_base import (
     AOTTAdapter,
     CompileContext,
@@ -58,7 +59,6 @@ from triton.runtime.autotuner import Autotuner, Config
 
 # @manual=//triton:triton
 from triton.runtime.jit import JITFunction, KernelInterface, mangle_type
-from triton_aot.build.triton.extension_builder import build_triton_aot_extension
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -474,6 +474,7 @@ class TritonAdapter(AOTTAdapter[TritonAOT]):
                 source_dir=fn_dir,
                 kernel_name=fn_name,
                 output_dir=fn_dir,
+                build_config=ctx.extension_build_config,
             )
 
     def find_kernel(self, node_target: Any) -> TritonAOT | None:
