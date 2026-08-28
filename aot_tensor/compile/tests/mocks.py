@@ -1,6 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-# pyre-strict
 
 """Shared test fixtures for triton_aot tests."""
 

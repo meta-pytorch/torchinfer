@@ -1,4 +1,3 @@
-# pyre-strict
 """
 Router module for Triton AOT extension builders.
 

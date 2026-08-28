@@ -1,4 +1,3 @@
-# pyre-strict
 """
 AMD HIP (ROCm) extension builder for Triton AOT kernels.
 

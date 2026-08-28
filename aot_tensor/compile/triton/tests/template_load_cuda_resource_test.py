@@ -1,7 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 
-# pyre-strict
 
 """Test that CUDA templates contain correct NVIDIA APIs.
 

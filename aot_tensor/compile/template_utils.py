@@ -1,7 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 
-# pyre-strict
 
 """Load and render the per-DSL C++ code templates.
 

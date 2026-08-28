@@ -1,6 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-# pyre-strict
 
 """Fundamental dtype mappings used across the AOT-T compiler."""
 

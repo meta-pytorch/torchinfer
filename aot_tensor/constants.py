@@ -1,6 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-# pyre-strict
 
 TRITON: str = "triton"
 CUTEDSL: str = "cutedsl"

@@ -1,6 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-# pyre-strict
 
 """Functions for converting kernel specs to architecture-specific formats.
 

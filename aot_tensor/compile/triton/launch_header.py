@@ -1,6 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-# pyre-strict
 """Locate the shared launch core header (``launch.h``) for the AOT-T build.
 
 Single source of truth for the candidate lookup so the codegen-time predicate

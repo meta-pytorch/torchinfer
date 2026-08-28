@@ -1,5 +1,3 @@
-# pyre-strict
-
 """
 Import-header utilities for aot_tensor codegen.
 """

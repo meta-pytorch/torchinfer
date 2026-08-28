@@ -1,6 +1,5 @@
 # (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
 
-# pyre-strict
 
 """Unit tests for the DSL-agnostic wrapper-codegen helpers in
 ``transform/wrapper_codegen_utils.py`` (torch.package source extraction +

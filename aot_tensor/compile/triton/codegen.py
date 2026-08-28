@@ -1,6 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-# pyre-strict
 
 """C++ and Python code generation for AOT-T compiled kernels.
 

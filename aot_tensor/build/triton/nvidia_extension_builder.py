@@ -1,4 +1,3 @@
-# pyre-strict
 """
 Triton-NVIDIA extension builder: the CUDA cubin-embedding build() flow.
 

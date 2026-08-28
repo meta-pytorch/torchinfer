@@ -1,6 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-# pyre-strict
 """
 This module provides shared utilities that handle differences between
 Triton versions.

@@ -1,5 +1,3 @@
-# pyre-strict
-
 """DSL-agnostic helpers shared by the per-DSL wrapper-codegen logic.
 
 Used by both ``compile/triton/adapter.py`` and ``compile/cutedsl/adapter.py``:

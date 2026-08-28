@@ -1,7 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 
-# pyre-strict
 
 import unittest
 from typing import Dict

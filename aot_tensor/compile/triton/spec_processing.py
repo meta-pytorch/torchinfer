@@ -1,6 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-# pyre-strict
 
 """Kernel spec processing for AOT-T compilation.
 Kernel arg taxonomy

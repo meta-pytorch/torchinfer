@@ -1,6 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-# pyre-strict
 
 """Unit tests for aot_tensor.compile.spec_conversion module."""
 

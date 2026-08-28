@@ -1,6 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-# pyre-strict
 
 """ArgDescriptor — per-arg codegen descriptor for AOT-T.
 

@@ -1,4 +1,3 @@
-# pyre-strict
 """
 DSL- and hardware-agnostic base for AOT-T extension builders.
 

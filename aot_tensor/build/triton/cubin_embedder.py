@@ -1,6 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
-# pyre-strict
 
 """
 Generate a C++ translation unit that embeds kernel binaries (.cubin for NVIDIA,

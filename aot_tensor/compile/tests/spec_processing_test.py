@@ -1,6 +1,5 @@
 # (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
 
-# pyre-strict
 # pyre-ignore-all-errors[2]: triton func without type
 
 import dataclasses
