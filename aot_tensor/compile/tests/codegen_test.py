@@ -275,6 +275,7 @@ class CompilerTest(unittest.TestCase):
             func,
             tuner_fallback=tuner_fallback,
             unit=unit,
+            backend="cuda",
         )
 
         common_strs = [
@@ -334,6 +335,7 @@ class CompilerTest(unittest.TestCase):
             self._create_mock_func(),
             tuner_fallback=tuner_fallback,
             unit=unit,
+            backend=backend,
         )
         self.assertIn("def _addmm_fwd_meta(", result)
         self.assertIn(returns_line, result)
@@ -377,6 +379,7 @@ class CompilerTest(unittest.TestCase):
             tuned,
             tuner_fallback=True,
             unit=unit,
+            backend="hip",
         )
         self.assertIn(
             "# Returns: (BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M, "

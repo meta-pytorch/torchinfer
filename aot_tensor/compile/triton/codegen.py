@@ -10,6 +10,7 @@ Generates:
   - _meta.py      (Python autotuner meta function)
 """
 
+import inspect
 import os
 import textwrap
 from collections import Counter
@@ -962,15 +963,26 @@ def gen_tuner_meta_py(
     func: Any,
     tuner_fallback: bool,
     unit: OpsUnit,
+    backend: str,
 ) -> str:
     vals = []
 
     guard_list = []
     autotune_fields = unit.autotune_fields
 
-    # Use custom meta generation function if available
+    # Use custom meta generation function if available (PPO hook).
+    # Pass down the field table so PPO renders the same arity AOT-T
+    # will unpack.  The signature probe keeps old packages working.
     if hasattr(func, "gen_autotune_select_meta_src"):
-        return func.gen_autotune_select_meta_src(unit.constant_types)
+        hook = func.gen_autotune_select_meta_src
+        if "autotune_field_defaults" in inspect.signature(hook).parameters:
+            return hook(
+                unit.constant_types,
+                backend=backend,
+                constexpr_keys=unit.constexpr_keys,
+                autotune_field_defaults={f.name: f.default for f in autotune_fields},
+            )
+        return hook(unit.constant_types)
 
     if hasattr(func, "cache") and is_non_empty_mapping_of_type(
         func.cache, triton.runtime.autotuner.Config

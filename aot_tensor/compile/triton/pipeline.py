@@ -304,6 +304,7 @@ def compile_to_cpp(
                 meta_func,
                 tuner_fallback,
                 unit,
+                backend=gpu_target.backend,
             )
         )
 
