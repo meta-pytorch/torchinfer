@@ -6,8 +6,8 @@ It automatically selects the appropriate builder (NVIDIA or AMD) based on
 the PyTorch build configuration.
 """
 
-import torch
 from aot_tensor.build.extension_build_config import ExtensionBuildConfig
+from aot_tensor.build.gpu_backend import is_amd
 from aot_tensor.build.triton.amd_extension_builder import AmdExtensionBuilder
 from aot_tensor.build.triton.nvidia_extension_builder import NvidiaExtensionBuilder
 
@@ -15,10 +15,6 @@ from aot_tensor.build.triton.nvidia_extension_builder import NvidiaExtensionBuil
 # headers, neither of which is visible through a normal Python import.
 # @dep=//aot_tensor/fb:runtime_deps
 # @dep=//triton_aot/build:torch_cpp_headers
-
-
-def _is_amd() -> bool:
-    return torch.version.hip is not None
 
 
 def build_triton_aot_extension(
@@ -49,7 +45,7 @@ def build_triton_aot_extension(
         RuntimeError: If CUDA/HIP is not properly configured or build fails.
         AssertionError: If required source files are missing.
     """
-    if _is_amd():
+    if is_amd():
         builder = AmdExtensionBuilder(
             source_dir, kernel_name, output_dir, build_config=build_config
         )
