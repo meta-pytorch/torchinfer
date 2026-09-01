@@ -5,6 +5,7 @@
 import unittest
 from typing import Dict
 
+# @dep=//aot_tensor/compile/triton/templates:triton_templates
 from aot_tensor.compile.template_utils import render_template, TRITON_TEMPLATES
 from aot_tensor.constants import GENERATED_TOKEN
 from parameterized import parameterized

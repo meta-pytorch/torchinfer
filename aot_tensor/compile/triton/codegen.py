@@ -21,6 +21,8 @@ from typing import Any
 import triton
 from aot_tensor.compile.dtypes import CTYPES
 from aot_tensor.compile.stable_types import PY_TYPES_TO_CPP_TYPES, SCALAR_TYPES
+
+# @dep=//aot_tensor/compile/triton/templates:triton_templates
 from aot_tensor.compile.template_utils import TRITON_TEMPLATES
 from aot_tensor.compile.triton.arg_descriptor import (
     ArgDescriptor,

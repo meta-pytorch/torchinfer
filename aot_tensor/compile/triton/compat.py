@@ -8,6 +8,7 @@ Triton versions.
 import math
 from typing import Any
 
+# @dep=//caffe2:_torch
 # @manual=//triton:triton
 import triton
 from packaging.version import Version

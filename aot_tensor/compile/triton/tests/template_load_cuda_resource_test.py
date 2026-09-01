@@ -11,6 +11,7 @@ machines without requiring GPU hardware since it only reads template files.
 
 import unittest
 
+# @dep=//aot_tensor/compile/triton/templates:triton_templates
 from aot_tensor.compile.template_utils import TRITON_TEMPLATES
 
 
