@@ -4,6 +4,7 @@
 import unittest
 from typing import Any
 
+from aot_tensor.build.extension_build_config import ExtensionBuildConfig
 from aot_tensor.compile.adapter_base import AOTTAdapter, CompileContext, DslSpecStore
 from aot_tensor.compile.aott_compile import (
     AOTTCompileSession,
@@ -137,6 +138,21 @@ class CompileSessionTest(unittest.TestCase):
         # __exit__ cleared the overridden collector along with the defaults.
         self.assertIsNone(TritonAOT.spec_collector)
         self.assertFalse(is_aott_compile_enabled())
+
+    def test_session_forwards_extension_build_config(self) -> None:
+        adapter = _RecordingAdapter()
+        extension_build_config = ExtensionBuildConfig(
+            compiler_path="/opt/clang/bin/clang"
+        )
+
+        with AOTTCompileSession(extension_build_config=extension_build_config):
+            get_aott_compile_state().dsl_state[adapter.name] = DslSpecStore(dsl=adapter)
+
+        self.assertEqual(len(adapter.contexts), 1)
+        self.assertIs(
+            adapter.contexts[0].extension_build_config,
+            extension_build_config,
+        )
 
     def test_exit_skips_compile_when_body_raises(self) -> None:
         adapter = _RecordingAdapter()
