@@ -16,6 +16,7 @@ from aot_tensor.compile.compile_state import (
     get_kernel_specs,
     register_active,
 )
+from aot_tensor.compile.cutedsl.pipeline import compile_cutedsl_to_cpp
 from aot_tensor.constants import CUTEDSL
 from aot_tensor.cute_specs import sample_spec_and_hash
 from aot_tensor.transform.wrapper_codegen_utils import (
@@ -25,7 +26,6 @@ from aot_tensor.transform.wrapper_codegen_utils import (
 )
 from aot_tensor.types import CuTeAOT, get_cutedsl_aot_dir_name
 from torch import package
-from triton_aot.compile.cutedsl.pipeline import compile_cutedsl_to_cpp
 
 logger: logging.Logger = logging.getLogger(__name__)
 
