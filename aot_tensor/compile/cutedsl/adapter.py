@@ -8,6 +8,7 @@ import logging
 import os
 from typing import Any
 
+from aot_tensor.build.cutedsl.extension_builder import build_cutedsl_aot_extension
 from aot_tensor.compile.adapter_base import AOTTAdapter, CompileContext, DslSpecStore
 from aot_tensor.compile.compile_state import (
     add_spec,
@@ -24,7 +25,6 @@ from aot_tensor.transform.wrapper_codegen_utils import (
 )
 from aot_tensor.types import CuTeAOT, get_cutedsl_aot_dir_name
 from torch import package
-from triton_aot.build.cutedsl.extension_builder import build_cutedsl_aot_extension
 from triton_aot.compile.cutedsl.pipeline import compile_cutedsl_to_cpp
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -86,6 +86,7 @@ class CuTeAdapter(AOTTAdapter[tuple[CuTeAOT, set[str]]]):
                 source_dir=fn_dir,
                 kernel_name=fn_name,
                 output_dir=fn_dir,
+                build_config=ctx.extension_build_config,
             )
 
     def find_kernel(self, node_target: Any) -> tuple[CuTeAOT, set[str]] | None:
