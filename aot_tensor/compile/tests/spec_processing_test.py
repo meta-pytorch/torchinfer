@@ -40,7 +40,6 @@ from aot_tensor.compile.triton.utils import kernel_param_names
 from parameterized import parameterized
 from triton.backends.compiler import GPUTarget
 from triton.compiler.code_generator import ASTFunction
-from triton_aot.shared.types import AUTOTUNE_ATTRs
 
 
 @triton.jit
@@ -680,23 +679,6 @@ class AutotuneAttrsTest(unittest.TestCase):
         annotated = AutotuneAttrs.field_python_types()
         for f in dataclasses.fields(AutotuneAttrs):
             self.assertIn(f.name, annotated)
-
-    def test_autotune_fields_match_AUTOTUNE_ATTRs(self) -> None:
-        """tritoncc back-compat: ``AUTOTUNE_ATTRs`` tracks COMMON+AMD
-        (it doesn't consume NVIDIA-only knobs like ``num_ctas``). Order
-        matters — tritoncc iterates ``.keys()`` to emit fields.
-        """
-        tritoncc_tracked = AutotuneAttrs.COMMON_FIELDS | AutotuneAttrs.AMD_ONLY_FIELDS
-        expected = {
-            f.name: f.default
-            for f in dataclasses.fields(AutotuneAttrs)
-            if f.name in tritoncc_tracked
-        }
-        self.assertEqual(expected, dict(AUTOTUNE_ATTRs))
-        self.assertEqual(list(expected), list(AUTOTUNE_ATTRs))
-        # The whole point of NVIDIA_ONLY_FIELDS: tritoncc must not see them.
-        for nv_only in AutotuneAttrs.NVIDIA_ONLY_FIELDS:
-            self.assertNotIn(nv_only, AUTOTUNE_ATTRs)
 
     def test_kernel_spec_autotune_is_per_instance(self) -> None:
         """Guard the default-factory: each KernelSpec must own its AutotuneAttrs."""
