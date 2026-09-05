@@ -183,7 +183,7 @@ class CuTeAOT(AOTTMarker, metaclass=AOTTMarkerMeta):
         # Lazy imports: `eager` breaks a types<->cutedsl.eager cycle; cutlass is a
         # stub-less GPU-only dep, injected here so eager.py needs no GPU import.
         import cutlass.cute as cute  # @manual  # pyre-ignore[21]: no stubs
-        from triton_aot.compile.cutedsl import (  # @manual  # pyre-ignore[21]
+        from aot_tensor.compile.cutedsl import (  # @manual  # pyre-ignore[21]
             eager as cutedsl_eager,
         )
 
