@@ -14,7 +14,7 @@ from aot_tensor.build.triton.nvidia_extension_builder import NvidiaExtensionBuil
 # Runtime-built extensions require the host's native Torch symbols and bundled
 # headers, neither of which is visible through a normal Python import.
 # @dep=//aot_tensor/fb:runtime_deps
-# @dep=//triton_aot/build:torch_cpp_headers
+# @dep=//aot_tensor/build:torch_cpp_headers
 
 
 def build_triton_aot_extension(
