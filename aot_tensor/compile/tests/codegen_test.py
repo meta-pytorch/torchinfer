@@ -247,6 +247,42 @@ class CompilerTest(unittest.TestCase):
         for s in expected_strs:
             self.assertIn(s, result)
 
+    def test_gen_tuner_meta_cpp_uniform_arity_with_amd_kwargs(self) -> None:
+        """HIP configs carry backend options (``waves_per_eu`` etc.)
+        inside the hybrid ``cfg.kwargs``, and only SOME configs set
+        them. The declared tuple return type is inferred from the first
+        cache entry alone, so heterogeneous kwargs must not leak into
+        the emitted tuples -- a length mismatch is a C++ compile error
+        in the wrapper TU that includes the header (caught on a real
+        gfx950 RE lowering)."""
+        func = self._create_mock_tuned_func()
+        # First entry carries an AMD launch option; second does not.
+        func.cache[(256, 1024)] = triton.Config(
+            {
+                "BLOCK_M": 64,
+                "BLOCK_N": 32,
+                "BLOCK_K": 32,
+                "GROUP_M": 8,
+                "waves_per_eu": 2,
+            },
+            num_warps=2,
+            num_stages=5,
+        )
+        result = gen_tuner_meta_cpp(
+            func,
+            tuner_fallback=True,
+            constant_types=self._create_mock_unit().constant_types,
+        )
+        declared = re.search(r"inline std::tuple<([^>]*)>", result)
+        assert declared is not None
+        declared_arity = len(declared.group(1).split(","))
+        tuple_arities = {
+            len(m.split(",")) for m in re.findall(r"std::make_tuple\(([^)]*)\)", result)
+        }
+        self.assertEqual(tuple_arities, {declared_arity})
+        # The backend option itself must not appear in the selector.
+        self.assertNotIn("waves_per_eu", result)
+
     @parameterized.expand(
         [
             (

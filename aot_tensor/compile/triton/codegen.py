@@ -33,7 +33,11 @@ from aot_tensor.compile.triton.arg_descriptor import (
 from aot_tensor.compile.triton.compat import _get_cluster_dims, get_scratch_parameters
 from aot_tensor.compile.triton.launch_header import find_launch_header
 from aot_tensor.compile.triton.spec_processing import AutotuneAttrs, KernelSpec, OpsUnit
-from aot_tensor.compile.triton.utils import hash_kernel_name, unwrap_to_jit
+from aot_tensor.compile.triton.utils import (
+    cfg_constexpr_keys,
+    hash_kernel_name,
+    unwrap_to_jit,
+)
 from aot_tensor.constants import generated_header
 from triton.runtime.jit import JITFunction
 
@@ -1072,9 +1076,36 @@ def gen_tuner_meta_cpp(
 
     vals = []
     guard_list = []
+    # ``cfg.kwargs`` is the hybrid dict (constexprs + backend launch
+    # options): HIP configs may carry ``waves_per_eu``-style options that
+    # NV configs (or sibling HIP configs) don't, so raw values() gives
+    # DIFFERENT tuple lengths across cache entries -- but the declared
+    # return type is inferred from vals[0] alone, and a length mismatch
+    # is a C++ compile error in the wrapper TU that includes this
+    # header. Filter POSITIVELY by kernel-signature membership
+    # (``cfg_constexpr_keys``) rather than by the known-backend-option
+    # complement (reviewer catch: a FUTURE backend knob absent from the
+    # AutotuneAttrs mirror would survive a complement filter and re-open
+    # the exact arity bug this fixes); the backend options already live
+    # in the launch metadata, not in this (dead-code) selector.
     for key, cfg in func.cache.items():
-        val = list(cfg.kwargs.values()) + [cfg.num_warps, cfg.num_stages]
+        val = [cfg.kwargs[k] for k in cfg_constexpr_keys(func, cfg)] + [
+            cfg.num_warps,
+            cfg.num_stages,
+        ]
         val = tuple(val)
+        # Belt-and-suspenders (P2487810135 R3a): cfg_constexpr_keys filters
+        # by kernel-signature membership so arity SHOULD be uniform, but
+        # two configs can still disagree on WHICH signature CONSTEXPRs
+        # they set. That mismatch is a C++ compile error in every TU that
+        # includes this header -- fail at generation time with names.
+        if vals and len(val) != len(vals[0]):
+            raise ValueError(
+                "gen_tuner_meta_cpp: non-uniform meta-tuple arity "
+                f"({len(val)} vs {len(vals[0])}) across autotune cache "
+                f"entries of {unwrap_to_jit(func).__name__}: configs "
+                "disagree on which kernel CONSTEXPRs they set"
+            )
         vals.append(val)
         equations = []
         for arg, value in zip(arg_names, key):
