@@ -16,6 +16,11 @@ from typing import Any
 # value = ``torch::headeronly::ScalarType`` (not ``c10::``) per libtorch_stable_abi.md.
 # See SCALAR_TYPES test.
 SCALAR_TYPES: dict[str, str] = {
+    # Triton mangles ``torch.bool`` to ``*u1``, not ``*i1`` -- verified against
+    # ``mangle_type`` in stable_types_test. ``*i1`` is unreachable (no dtype
+    # mangles to it) and is kept only so an out-of-tree caller keying on it
+    # does not break; ``*u1`` is the one that fires.
+    "*u1": "torch::headeronly::ScalarType::Bool",
     "*i1": "torch::headeronly::ScalarType::Bool",
     "*u8": "torch::headeronly::ScalarType::Byte",
     "*i8": "torch::headeronly::ScalarType::Char",

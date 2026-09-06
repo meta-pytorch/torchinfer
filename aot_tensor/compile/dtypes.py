@@ -23,6 +23,12 @@ CTYPES: dict[str, str] = {
 
 # Mapping from Triton pointer dtype names to ATen scalar types
 ATYPES: dict[str, str] = {
+    # Triton mangles ``torch.bool`` to ``*u1``, not ``*i1``. ``*i1`` is
+    # unreachable (no dtype mangles to it) and is kept only so an out-of-tree
+    # caller keying on it does not break; ``*u1`` is the one that fires.
+    # Kept in sync with ``stable_types.SCALAR_TYPES`` -- see
+    # ``triton_aot/compile/tests/stable_types_test.py::test_keys_match_atypes``.
+    "*u1": "at::kBool",
     "*i1": "at::kBool",
     "*u8": "at::kByte",
     "*i8": "at::kChar",

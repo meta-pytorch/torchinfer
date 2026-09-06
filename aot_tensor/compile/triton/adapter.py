@@ -281,7 +281,7 @@ def infer_spec(  # noqa: C901
         elif arg is None:
             spec.append(None)
         elif isinstance(arg, torch.Tensor):
-            # Reject dtypes SCALAR_TYPES can't render (e.g. *u1, *u16, *fp8e5)
+            # Reject dtypes SCALAR_TYPES can't render (e.g. *u16, *fp8e5)
             # so codegen doesn't KeyError downstream.
             type_str = mangle_type(arg)
             if type_str not in SCALAR_TYPES:
