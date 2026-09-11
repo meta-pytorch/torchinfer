@@ -37,7 +37,7 @@ from aot_tensor.compile.triton.utils import (
     try_get_autotuner,
     unwrap_to_jit,
 )
-from aot_tensor.constants import TRITON
+from aot_tensor.constants import DEFAULT_OP_NAMESPACE_PREFIX, TRITON
 from aot_tensor.transform.wrapper_codegen_utils import (
     _get_clean_module_basename,
     find_sole_marker_in_globals,
@@ -417,31 +417,51 @@ class TritonCompileConfig(DslCompileConfig):
         ``gpu_target`` before compile. ``None`` (OSS default) is a no-op; the
         internal entry injects the Meta implementation (guardrails stays fb-only,
         core never imports it).
+    op_namespace: operator namespace for the generated registration AND the
+        wrapper's ``torch.ops.<ns>.<name>`` call -- the two must agree or the
+        rewritten graph calls an operator nothing registered. Default
+        ``aot_tensor``. A multi-forward publish gives each forward method its
+        own namespace so their kernel libraries can coexist: both register at
+        dlopen, and ``Dispatcher::registerDef`` hard-fails a second ``def`` of
+        one operator.
     """
 
     auto_tune_cache_overrides: dict[str, AutotuneCache] | None = None
     gpu_target: GPUTarget | None = None
     drift_check: Callable[[GPUTarget], None] | None = None
+    op_namespace: str = DEFAULT_OP_NAMESPACE_PREFIX
 
 
 class TritonAdapter(AOTTAdapter[TritonAOT]):
     """AOT-T DSL integration for native Triton kernels (``@triton_aot``)."""
 
     name: str = TRITON
+    # Overwritten by compile_and_build from the config. Declared here, sourced
+    # from the config's own default, so ``generate_wrapper_files`` on an
+    # adapter that never compiled in this process still resolves -- and the
+    # default itself is still declared in exactly one place.
+    _op_namespace: str = TritonCompileConfig.op_namespace
 
     def compile_and_build(self, ctx: CompileContext) -> None:
-        cfg = ctx.find_config(TritonCompileConfig)
+        # Materialized when absent so every default lives in exactly one place
+        # -- the dataclass -- instead of being restated at each read.
+        cfg = ctx.find_config(TritonCompileConfig) or TritonCompileConfig()
         gpu_target = (
             cfg.gpu_target
-            if cfg and cfg.gpu_target is not None
+            if cfg.gpu_target is not None
             else driver.active.get_current_target()
         )
         _warn_if_host_mismatches_target(gpu_target)
-        if cfg is not None and cfg.drift_check is not None:
+        if cfg.drift_check is not None:
             cfg.drift_check(gpu_target)
 
         kernel_specs = get_kernel_specs(self.name)
-        auto_tune_overrides = (cfg.auto_tune_cache_overrides if cfg else None) or {}
+        auto_tune_overrides = cfg.auto_tune_cache_overrides or {}
+        # Stashed for the wrapper stage: generate_wrapper_files runs after the
+        # session has exited and has no CompileContext, but the wrapper's
+        # torch.ops.<ns>.<name> call must name the same namespace this build
+        # registers under.
+        self._op_namespace = cfg.op_namespace
 
         logger.info(f"[AOTT]: compiling {len(kernel_specs)} kernels")
 
@@ -466,6 +486,7 @@ class TritonAdapter(AOTTAdapter[TritonAOT]):
                 prefix=f"{fn_name}",
                 gpu_target=gpu_target,
                 tuner_fallback=True,
+                op_namespace=self._op_namespace,
                 import_module=ctx.import_module,
                 default_values=default_values,
             )
@@ -515,7 +536,10 @@ class TritonAdapter(AOTTAdapter[TritonAOT]):
         generate_wrapper_files_skeleton(
             node_target,
             kernel_dir=kernel_dir,
-            transformer=TritonAOTOperatorTransform(kernel=match),
+            transformer=TritonAOTOperatorTransform(
+                kernel=match,
+                op_namespace=self._op_namespace,
+            ),
             compile_path=compile_path,
             package_importer=package_importer,
         )
@@ -561,7 +585,13 @@ def _calls_triton_aot_kernel(node: ast.FunctionDef, kernel_name: str) -> bool:
 
 
 class TritonAOTOperatorTransform(ast.NodeTransformer):
-    def __init__(self, kernel: Any, gpu_target: Optional[GPUTarget] = None) -> None:
+    def __init__(
+        self,
+        kernel: Any,
+        op_namespace: str,
+        gpu_target: Optional[GPUTarget] = None,
+    ) -> None:
+        self._op_namespace: str = op_namespace
         super().__init__()
         self._kernel: Any = kernel
         self.gpu_target: GPUTarget = gpu_target or driver.active.get_current_target()
@@ -663,7 +693,7 @@ class TritonAOTOperatorTransform(ast.NodeTransformer):
                             attr="ops",
                             ctx=ast.Load(),
                         ),
-                        attr="triton_aot",
+                        attr=self._op_namespace,
                         ctx=ast.Load(),
                     ),
                     attr=self._kernel_name,

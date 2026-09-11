@@ -44,6 +44,7 @@ from aot_tensor.compile.triton.codegen import (
     validate_unique_kernel_names,
 )
 from aot_tensor.compile.triton.spec_processing import AutotuneAttrs, KernelSpec, OpsUnit
+from aot_tensor.constants import DEFAULT_OP_NAMESPACE_PREFIX
 from parameterized import parameterized
 from triton.runtime import JITFunction
 
@@ -597,18 +598,26 @@ class CompilerTest(unittest.TestCase):
         descriptors = self._create_descriptors()
 
         result = generate_torch_op_content(
-            func, descriptors, prefix, {}, AutotuneAttrs.fields_for("cuda")
+            func,
+            descriptors,
+            prefix,
+            {},
+            AutotuneAttrs.fields_for("cuda"),
+            DEFAULT_OP_NAMESPACE_PREFIX,
         )
 
         expected_strs = [
             f'#include "{prefix}.h"',
             f"void {func.__name__}_op(",
             f"void {func.__name__}_dummy_op(",
-            "STABLE_TORCH_LIBRARY_FRAGMENT(triton_aot, m)",
+            # Built from the constant, not spelled out: codegen emits
+            # whatever namespace it is given, so a literal here would silently
+            # rot the day the default is renamed.
+            f"STABLE_TORCH_LIBRARY_FRAGMENT({DEFAULT_OP_NAMESPACE_PREFIX}, m)",
             "m.def(",
-            "STABLE_TORCH_LIBRARY_IMPL(triton_aot, CUDA, m)",
-            "STABLE_TORCH_LIBRARY_IMPL(triton_aot, CPU, m)",
-            "STABLE_TORCH_LIBRARY_IMPL(triton_aot, Meta, m)",
+            f"STABLE_TORCH_LIBRARY_IMPL({DEFAULT_OP_NAMESPACE_PREFIX}, CUDA, m)",
+            f"STABLE_TORCH_LIBRARY_IMPL({DEFAULT_OP_NAMESPACE_PREFIX}, CPU, m)",
+            f"STABLE_TORCH_LIBRARY_IMPL({DEFAULT_OP_NAMESPACE_PREFIX}, Meta, m)",
             "TORCH_BOX",
             "non-optional but use Tensor?",
             # Both pin a position, not just a presence. Which brace carries
@@ -616,7 +625,7 @@ class CompilerTest(unittest.TestCase):
             # only thing covering the blank line before the CUDA block -- the
             # first one spans a separator that already existed.
             "}\n} // namespace\n\nSTABLE_TORCH_LIBRARY_FRAGMENT",
-            "}\n\nSTABLE_TORCH_LIBRARY_IMPL(triton_aot, CUDA, m)",
+            f"}}\n\nSTABLE_TORCH_LIBRARY_IMPL({DEFAULT_OP_NAMESPACE_PREFIX}, CUDA, m)",
         ]
         for s in expected_strs:
             self.assertIn(s, result)
@@ -652,7 +661,12 @@ class CompilerTest(unittest.TestCase):
         prefix = "_addmm_fwd"
 
         result = generate_torch_op_content(
-            func, descriptors, prefix, default_values, AutotuneAttrs.fields_for("cuda")
+            func,
+            descriptors,
+            prefix,
+            default_values,
+            AutotuneAttrs.fields_for("cuda"),
+            DEFAULT_OP_NAMESPACE_PREFIX,
         )
 
         self.assertIn(expected_str, result)
@@ -684,7 +698,12 @@ class CompilerTest(unittest.TestCase):
                 backend="cuda",
             ),
             "torch_op.cpp": generate_torch_op_content(
-                func, descriptors, "_addmm_fwd", {}, autotune_fields
+                func,
+                descriptors,
+                "_addmm_fwd",
+                {},
+                autotune_fields,
+                DEFAULT_OP_NAMESPACE_PREFIX,
             ),
         }
 
@@ -712,6 +731,7 @@ class CompilerTest(unittest.TestCase):
             "_addmm_fwd",
             {"BLOCK_M": 128},
             AutotuneAttrs.fields_for("cuda"),
+            DEFAULT_OP_NAMESPACE_PREFIX,
         )
 
         # The registration splits the schema across adjacent string literals,

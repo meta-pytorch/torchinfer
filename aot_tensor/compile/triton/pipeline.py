@@ -185,6 +185,7 @@ def compile_to_cpp(
     import_module: Callable[[str], ModuleType],
     default_values: dict[str, Any] | None = None,
     tuner_fallback: bool = False,
+    op_namespace: str,
 ) -> None:
     """Compile a Triton kernel into .cpp, .h, _torch_op.cpp, _meta.py files.
 
@@ -283,7 +284,7 @@ def compile_to_cpp(
 
     # Generate torch_op.cpp file
     torch_op_content = generate_torch_op_content(
-        func, descriptors, prefix, default_values, autotune_fields
+        func, descriptors, prefix, default_values, autotune_fields, op_namespace
     )
 
     with open(torch_out, "w") as fp:

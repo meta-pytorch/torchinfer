@@ -194,20 +194,20 @@ void {func_name}_dummy_op(
 }}
 }} // namespace
 
-STABLE_TORCH_LIBRARY_FRAGMENT(triton_aot, m) {{
+STABLE_TORCH_LIBRARY_FRAGMENT({op_ns}, m) {{
   m.def(
       {schema_literals});
 }}
 
-STABLE_TORCH_LIBRARY_IMPL(triton_aot, CUDA, m) {{
+STABLE_TORCH_LIBRARY_IMPL({op_ns}, CUDA, m) {{
   m.impl("{func_name}", TORCH_BOX(&{func_name}_op));
 }}
 
-STABLE_TORCH_LIBRARY_IMPL(triton_aot, CPU, m) {{
+STABLE_TORCH_LIBRARY_IMPL({op_ns}, CPU, m) {{
   m.impl("{func_name}", TORCH_BOX(&{func_name}_dummy_op));
 }}
 
-STABLE_TORCH_LIBRARY_IMPL(triton_aot, Meta, m) {{
+STABLE_TORCH_LIBRARY_IMPL({op_ns}, Meta, m) {{
   m.impl("{func_name}", TORCH_BOX(&{func_name}_dummy_op));
 }}
 """
@@ -915,6 +915,7 @@ def gen_torch_op(
     descriptors: list[ArgDescriptor],
     default_values: dict[str, Any],
     autotune_fields: tuple[Field[Any], ...],
+    op_namespace: str,
 ) -> str:
     cpp_params = gen_cpp_op_params(descriptors, autotune_fields, indent=_CONT)
     arg_names = list(func.arg_names) + [f.name for f in autotune_fields]
@@ -935,6 +936,7 @@ def gen_torch_op(
         )
     return _TORCH_OP_TMPL.format(
         type_comment=type_comment,
+        op_ns=op_namespace,
         func_name=func.__name__,
         cpp_params=cpp_params,
         args=args,
@@ -1227,9 +1229,12 @@ def generate_torch_op_content(
     prefix: str,
     default_values: dict[str, Any],
     autotune_fields: tuple[Field[Any], ...],
+    op_namespace: str,
 ) -> str:
     """Generate the content of the torch_op .cpp file."""
-    torch_op_content = gen_torch_op(func, descriptors, default_values, autotune_fields)
+    torch_op_content = gen_torch_op(
+        func, descriptors, default_values, autotune_fields, op_namespace
+    )
     torch_content = TRITON_TEMPLATES.render(
         "torch_op.cpp",
         {
