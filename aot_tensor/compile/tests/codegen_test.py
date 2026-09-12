@@ -484,6 +484,58 @@ class CompilerTest(unittest.TestCase):
         self.assertNotIn("_addmm_fwd_meta", result)
         self.assertIn("void _addmm_fwd(", result)
 
+    def _assert_hidden(self, content: str, needle: str) -> None:
+        """Assert ``needle`` is emitted inside a hidden-visibility region.
+
+        Checking only that the pragma is present somewhere would still pass if
+        it drifted away from the generated block, so pin the ordering.
+        """
+        push = content.find("#pragma GCC visibility push(hidden)")
+        self.assertNotEqual(-1, push, "no visibility push(hidden) emitted")
+        pop = content.find("#pragma GCC visibility pop", push)
+        self.assertNotEqual(-1, pop, "no visibility pop after the push")
+        self.assertNotEqual(-1, content.find(needle), f"{needle!r} not emitted")
+        # Searched from the push, not from 0: the same text can legitimately
+        # appear in an earlier generated region, and matching that occurrence
+        # would report "precedes the hidden region" for a correctly hidden one.
+        at = content.find(needle, push)
+        self.assertNotEqual(-1, at, f"{needle!r} precedes the hidden region")
+        self.assertLess(at, pop, f"{needle!r} follows the hidden region")
+
+    # The selector is named after the kernel alone, so every .so built for a
+    # kernel exports the same `triton::aot::<kernel>` symbol. Multi-forward
+    # emits one .so per forward method and the predictor dlopens them all into
+    # one process, so at default visibility the first library loaded wins the
+    # binding and answers every method's calls -- running another method's
+    # guard chain over a different set of compiled variants, which surfaces as
+    # a bogus "[TritonAOT] No implementation found".
+    def test_generated_header_hides_selector(self) -> None:
+        result = generate_header_content(
+            tuned_func=self._create_mock_tuned_func(),
+            func=self._create_mock_func(),
+            unit=self._create_mock_unit(),
+            descriptors=self._create_descriptors(),
+            tuner_fallback=True,
+            autotune_fields=AutotuneAttrs.fields_for("cuda"),
+        )
+        self._assert_hidden(result, "void _addmm_fwd(")
+
+    def test_generated_kernel_cpp_hides_selector_and_specs(self) -> None:
+        func = self._create_mock_func()
+        generated_specs = ["// mock generated specs from spec_gen"]
+
+        result = generate_kernel_cpp_content(
+            func,
+            self._create_mock_unit(),
+            self._create_descriptors(),
+            "_addmm_fwd",
+            generated_specs,
+            AutotuneAttrs.fields_for("cuda"),
+            backend="cuda",
+        )
+        self._assert_hidden(result, f"void {func.__name__}(")
+        self._assert_hidden(result, generated_specs[0])
+
     @parameterized.expand(
         [
             ("default_prefix", "_addmm_fwd"),

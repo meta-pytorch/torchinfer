@@ -97,11 +97,17 @@ void enable_large_smem_or_throw(int shared, CUfunction func) {
 #endif
 } // namespace
 
+// Hidden for the same reason as the prototypes in kernel.h: one .so per
+// forward method, all defining the same `triton::aot::<kernel>` selector, all
+// dlopen'd into one predictor process. Only torch_op.cpp calls these, and it
+// is compiled into this same .so.
+#pragma GCC visibility push(hidden)
 // __TRITON_AOT_GENERATE_BEGIN__ KERNEL_SPECS
 // __TRITON_AOT_GENERATE_END__ KERNEL_SPECS
 
 // __TRITON_AOT_GENERATE_BEGIN__ SELECTOR
 // __TRITON_AOT_GENERATE_END__ SELECTOR
+#pragma GCC visibility pop
 
 } // namespace aot
 } // namespace triton

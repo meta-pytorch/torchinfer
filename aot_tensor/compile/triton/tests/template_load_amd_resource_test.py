@@ -13,6 +13,9 @@ import unittest
 
 # @dep=//aot_tensor/compile/triton/templates:triton_templates
 from aot_tensor.compile.template_utils import TRITON_TEMPLATES
+from aot_tensor.compile.triton.tests.template_visibility import (
+    assert_generated_regions_are_hidden,
+)
 
 
 class TemplateAmdApiTest(unittest.TestCase):
@@ -58,6 +61,10 @@ class TemplateAmdApiTest(unittest.TestCase):
 
         # D4: stable ABI headers replace ATen
         self.assertNotIn("ATen/Tensor.h", kernel_h)
+
+    # Asserted on the hipified copy too: the pragma has to survive hipify.
+    def test_generated_regions_are_hidden(self) -> None:
+        assert_generated_regions_are_hidden(self, TRITON_TEMPLATES)
 
     def test_torch_op_cpp_has_stable_abi(self) -> None:
         """Test torch_op.cpp uses stable ABI registration."""

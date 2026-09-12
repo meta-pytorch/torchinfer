@@ -13,6 +13,9 @@ import unittest
 
 # @dep=//aot_tensor/compile/triton/templates:triton_templates
 from aot_tensor.compile.template_utils import TRITON_TEMPLATES
+from aot_tensor.compile.triton.tests.template_visibility import (
+    assert_generated_regions_are_hidden,
+)
 
 
 class TemplateCudaApiTest(unittest.TestCase):
@@ -77,6 +80,9 @@ class TemplateCudaApiTest(unittest.TestCase):
         self.assertIn("torch/csrc/stable/tensor.h", kernel_h)
         self.assertNotIn("ATen/Tensor.h", kernel_h)
         self.assertNotIn("torch/types.h", kernel_h)
+
+    def test_generated_regions_are_hidden(self) -> None:
+        assert_generated_regions_are_hidden(self, TRITON_TEMPLATES)
 
     def test_torch_op_cpp_has_stable_abi(self) -> None:
         """Test torch_op.cpp uses stable ABI registration."""
