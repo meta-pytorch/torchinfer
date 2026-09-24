@@ -9,7 +9,11 @@ from types import ModuleType
 from unittest.mock import patch
 
 from aot_tensor.build.extension_build_config import ExtensionBuildConfig
-from aot_tensor.compile.adapter_base import CompileContext, KernelSpecs
+from aot_tensor.compile.adapter_base import (
+    CompileContext,
+    CompiledArtifact,
+    KernelSpecs,
+)
 from aot_tensor.compile.triton import adapter
 from triton.backends.compiler import GPUTarget
 
@@ -23,6 +27,7 @@ class TritonExtensionBuildConfigTest(unittest.TestCase):
     ) -> tuple[
         list[tuple[str, str, str, ExtensionBuildConfig | None]],
         str,
+        CompileContext,
     ]:
         calls: list[tuple[str, str, str, ExtensionBuildConfig | None]] = []
 
@@ -62,17 +67,41 @@ class TritonExtensionBuildConfigTest(unittest.TestCase):
             expected_dir = os.path.join(
                 tmpdir, f"{__name__.rsplit('.', 1)[-1]}_test_kernel"
             )
-            return calls, expected_dir
+            return calls, expected_dir, context
 
     def test_compile_uses_session_extension_build_config(self) -> None:
         session_build_config = ExtensionBuildConfig(compiler_path="/opt/session/clang")
 
-        calls, expected_dir = self._compile(
-            config=adapter.TritonCompileConfig(gpu_target=GPUTarget("cuda", 80, 32)),
+        gpu_target = GPUTarget("cuda", 80, 32)
+        calls, expected_dir, context = self._compile(
+            config=adapter.TritonCompileConfig(
+                gpu_target=gpu_target,
+                op_namespace="test_namespace",
+            ),
             session_build_config=session_build_config,
         )
 
         self.assertEqual(
             [(expected_dir, "test_kernel", expected_dir, session_build_config)],
             calls,
+        )
+        self.assertEqual(
+            context.artifacts,
+            [
+                CompiledArtifact(
+                    kind="shared_library",
+                    path=os.path.join(expected_dir, "test_kernel.so"),
+                ),
+                CompiledArtifact(
+                    kind="operator_schema",
+                    path=os.path.join(expected_dir, "aott_op_schemas.json"),
+                ),
+            ],
+        )
+        self.assertEqual(
+            context.dsl_metadata["triton"],
+            adapter.TritonBuildMetadata(
+                gpu_target=gpu_target,
+                op_namespace="test_namespace",
+            ),
         )

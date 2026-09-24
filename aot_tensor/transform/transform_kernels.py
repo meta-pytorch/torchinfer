@@ -14,10 +14,12 @@ from torch.fx import GraphModule
 
 logger: logging.Logger = logging.getLogger(__name__)
 
+WeightSignature = dict[str, tuple[tuple[int, ...], torch.dtype]]
 
-def _get_weight_signature(
+
+def get_weight_signature(
     module: torch.nn.Module,
-) -> dict[str, tuple[tuple[int, ...], torch.dtype]]:
+) -> WeightSignature:
     """Get a signature of all parameters and buffers: {name: (shape, dtype)}."""
     sig = {}
     for name, p in module.named_parameters():
@@ -27,15 +29,14 @@ def _get_weight_signature(
     return sig
 
 
-def assert_weight_signature_unchanged(
-    before: torch.nn.Module,
+def assert_weight_signature_matches(
+    before: WeightSignature,
     after: torch.nn.Module,
     context: str,
 ) -> None:
-    """Verify that parameter/buffer names, shapes, and dtypes are unchanged."""
-    sig_before = _get_weight_signature(before)
-    sig_after = _get_weight_signature(after)
-    before_names = set(sig_before.keys())
+    """Verify that *after* still has the captured parameter/buffer signature."""
+    sig_after = get_weight_signature(after)
+    before_names = set(before.keys())
     after_names = set(sig_after.keys())
     if before_names != after_names:
         raise RuntimeError(
@@ -44,15 +45,24 @@ def assert_weight_signature_unchanged(
             f"removed={before_names - after_names}"
         )
     for name in before_names:
-        if sig_before[name] != sig_after[name]:
+        if before[name] != sig_after[name]:
             raise RuntimeError(
                 f"[AOTT] {context} changed weight '{name}': "
-                f"before={sig_before[name]}, after={sig_after[name]}"
+                f"before={before[name]}, after={sig_after[name]}"
             )
     logger.info(
         f"[AOTT]: Weight signature check passed for {context}: "
-        f"{len(sig_before)} params/buffers unchanged"
+        f"{len(before)} params/buffers unchanged"
     )
+
+
+def assert_weight_signature_unchanged(
+    before: torch.nn.Module,
+    after: torch.nn.Module,
+    context: str,
+) -> None:
+    """Verify that parameter/buffer names, shapes, and dtypes are unchanged."""
+    assert_weight_signature_matches(get_weight_signature(before), after, context)
 
 
 def transform_kernels(

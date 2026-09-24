@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from types import ModuleType
-from typing import Any, Callable, cast, Generic, TypeVar
+from typing import Any, Callable, cast, Generic, Literal, TypeVar
 
 from aot_tensor.build.extension_build_config import ExtensionBuildConfig
 from torch import package
@@ -19,6 +19,13 @@ from torch import package
 # as its own concrete type without pyre casts. The key is DSL-defined: Triton
 # uses the JIT ``fn``, CuTeDSL the ``CuTeAOT`` marker object.
 KernelId = Any
+ArtifactKind = Literal["shared_library", "operator_schema"]
+
+
+@dataclass(frozen=True)
+class CompiledArtifact:
+    kind: ArtifactKind
+    path: str
 
 
 class CustomEncoder(json.JSONEncoder):
@@ -88,6 +95,8 @@ class CompileContext:
         self.compile_path = compile_path
         self.import_module = import_module
         self.extension_build_config = extension_build_config
+        self.artifacts: list[CompiledArtifact] = []
+        self.dsl_metadata: dict[str, object] = {}
         # Index by concrete type: at most one config per type.
         self.type_to_config: dict[type[DslCompileConfig], DslCompileConfig] = {}
         for cfg in dsl_config:
@@ -99,6 +108,12 @@ class CompileContext:
     def find_config(self, cls: type[TDslConfig]) -> TDslConfig | None:
         """Return the ``cls`` config, or ``None``."""
         return cast("TDslConfig | None", self.type_to_config.get(cls))
+
+    def record_artifact(self, kind: ArtifactKind, path: str) -> None:
+        self.artifacts.append(CompiledArtifact(kind=kind, path=path))
+
+    def record_dsl_metadata(self, name: str, metadata: object) -> None:
+        self.dsl_metadata[name] = metadata
 
 
 # ``TMatch`` is a DSL's match type (Triton: ``TritonAOT``;

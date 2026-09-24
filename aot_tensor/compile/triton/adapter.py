@@ -37,7 +37,11 @@ from aot_tensor.compile.triton.utils import (
     try_get_autotuner,
     unwrap_to_jit,
 )
-from aot_tensor.constants import DEFAULT_OP_NAMESPACE_PREFIX, TRITON
+from aot_tensor.constants import (
+    AOTT_OP_SCHEMAS_FILE_NAME,
+    DEFAULT_OP_NAMESPACE_PREFIX,
+    TRITON,
+)
 from aot_tensor.transform.wrapper_codegen_utils import (
     _get_clean_module_basename,
     find_sole_marker_in_globals,
@@ -432,6 +436,21 @@ class TritonCompileConfig(DslCompileConfig):
     op_namespace: str = DEFAULT_OP_NAMESPACE_PREFIX
 
 
+def resolve_triton_gpu_target(config: TritonCompileConfig) -> GPUTarget:
+    """Resolve the concrete target used by one Triton lowering invocation."""
+    return (
+        config.gpu_target
+        if config.gpu_target is not None
+        else driver.active.get_current_target()
+    )
+
+
+@dataclass(frozen=True)
+class TritonBuildMetadata:
+    gpu_target: GPUTarget
+    op_namespace: str
+
+
 class TritonAdapter(AOTTAdapter[TritonAOT]):
     """AOT-T DSL integration for native Triton kernels (``@triton_aot``)."""
 
@@ -446,14 +465,17 @@ class TritonAdapter(AOTTAdapter[TritonAOT]):
         # Materialized when absent so every default lives in exactly one place
         # -- the dataclass -- instead of being restated at each read.
         cfg = ctx.find_config(TritonCompileConfig) or TritonCompileConfig()
-        gpu_target = (
-            cfg.gpu_target
-            if cfg.gpu_target is not None
-            else driver.active.get_current_target()
-        )
+        gpu_target = resolve_triton_gpu_target(cfg)
         _warn_if_host_mismatches_target(gpu_target)
         if cfg.drift_check is not None:
             cfg.drift_check(gpu_target)
+        ctx.record_dsl_metadata(
+            self.name,
+            TritonBuildMetadata(
+                gpu_target=gpu_target,
+                op_namespace=cfg.op_namespace,
+            ),
+        )
 
         kernel_specs = get_kernel_specs(self.name)
         auto_tune_overrides = cfg.auto_tune_cache_overrides or {}
@@ -491,11 +513,16 @@ class TritonAdapter(AOTTAdapter[TritonAOT]):
                 default_values=default_values,
             )
 
-            build_triton_aot_extension(
+            shared_library = build_triton_aot_extension(
                 source_dir=fn_dir,
                 kernel_name=fn_name,
                 output_dir=fn_dir,
                 build_config=ctx.extension_build_config,
+            )
+            ctx.record_artifact("shared_library", shared_library)
+            ctx.record_artifact(
+                "operator_schema",
+                os.path.join(fn_dir, AOTT_OP_SCHEMAS_FILE_NAME),
             )
 
     def find_kernel(self, node_target: Any) -> TritonAOT | None:

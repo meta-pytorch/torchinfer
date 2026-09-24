@@ -95,6 +95,8 @@ class AOTTCompileSession:
       autotune-cache override path).
     - extension_build_config: session-wide extension compiler and include/library
       configuration. ``None`` leaves each builder on its OSS defaults.
+    - compile_path: optional caller-owned output directory. ``None`` preserves
+      the legacy lazily-created temporary directory behavior.
     - spec_collector_overrides: optional marker -> collector remap forwarded to
       ``enable_spec_collection`` (route a marker's compile to a custom adapter).
     """
@@ -107,6 +109,7 @@ class AOTTCompileSession:
         spec_collector_overrides: Optional[
             Mapping[type[AOTTMarker], SpecCollector]
         ] = None,
+        compile_path: Optional[str] = None,
     ) -> None:
         self._import_module: Callable[[str], ModuleType] = (
             package_importer.import_module
@@ -115,13 +118,18 @@ class AOTTCompileSession:
         )
         self._dsl_config: Sequence[DslCompileConfig] = dsl_config or ()
         self._extension_build_config = extension_build_config
+        self._compile_path = compile_path
+        self._compile_context: CompileContext | None = None
         self._spec_collector_overrides: Optional[
             Mapping[type[AOTTMarker], SpecCollector]
         ] = spec_collector_overrides
 
     def __enter__(self) -> None:
+        self._compile_context = None
         state = get_aott_compile_state()
         state.reset()
+        if self._compile_path is not None:
+            state.compile_path = self._compile_path
         enable_spec_collection(self._spec_collector_overrides)
         logger.info(f"Start AOTT compile, output dir: {get_aott_compile_path()}")
 
@@ -147,7 +155,14 @@ class AOTTCompileSession:
                 # completed, so assert_aott_compile_session_completed() cannot pass
                 # on a half-built compile dir.
                 get_aott_compile_state().session_completed = True
+                self._compile_context = ctx
         finally:
             # Always clear the marker collectors, even if a build raises, so
             # later JIT-only calls don't keep collecting into ``dsl_state``.
             disable_spec_collection()
+
+    @property
+    def compile_context(self) -> CompileContext:
+        if self._compile_context is None:
+            raise RuntimeError("AOTTCompileSession has not completed successfully")
+        return self._compile_context

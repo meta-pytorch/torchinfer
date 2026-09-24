@@ -154,6 +154,28 @@ class CompileSessionTest(unittest.TestCase):
             extension_build_config,
         )
 
+    def test_session_uses_explicit_compile_path(self) -> None:
+        adapter = _RecordingAdapter()
+        compile_path = "/tmp/aott-explicit-compile-path"
+        session = AOTTCompileSession(compile_path=compile_path)
+
+        with session:
+            get_aott_compile_state().dsl_state[adapter.name] = DslSpecStore(dsl=adapter)
+
+        self.assertEqual(len(adapter.contexts), 1)
+        self.assertEqual(adapter.contexts[0].compile_path, compile_path)
+        self.assertIs(session.compile_context, adapter.contexts[0])
+
+    def test_failed_session_has_no_compile_context(self) -> None:
+        session = AOTTCompileSession()
+
+        with self.assertRaises(ValueError):
+            with session:
+                raise ValueError("body failed")
+
+        with self.assertRaisesRegex(RuntimeError, "has not completed successfully"):
+            _ = session.compile_context
+
     def test_exit_skips_compile_when_body_raises(self) -> None:
         adapter = _RecordingAdapter()
         with self.assertRaises(ValueError):
