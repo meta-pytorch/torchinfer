@@ -54,6 +54,7 @@ Triton lowering path only.
 | `ExportOptions` | Configures validation inputs for export. PT2 export is reserved but not currently implemented. |
 | `export_model(lowering, *, options)` | Scripts the lowered module and writes `model.pt` plus `manifest.json` into the lowering work directory. |
 | `load_model(model_path)` | Loads every shared library listed in the manifest and returns the exported TorchScript module. |
+| `aot_tensor::loadModel(model_path)` | C++ equivalent of `load_model()`. It loads the manifest's shared libraries before returning the exported `torch::jit::Module`. |
 
 `lower_model()` currently accepts exactly one `TritonCompileConfig`. The
 public v0 lowering path does not yet support CuTeDSL kernels.
@@ -128,6 +129,21 @@ triton_config = TritonCompileConfig(
 Keep the PyTorch-provided Triton version rather than upgrading it independently.
 Set `TORCH_USE_RTLD_GLOBAL=YES` before importing PyTorch so generated stable-ABI
 libraries can resolve the required runtime symbols.
+
+### Load an exported model from C++
+
+Keep `model.pt`, its sibling `manifest.json`, and all manifest-relative shared
+libraries together. Pass the absolute `model.pt` path to the C++ loader:
+
+```cpp
+#include <aot_tensor/api/loading.h>
+
+auto module = aot_tensor::loadModel("/path/to/aott_artifact/model.pt");
+auto output = module.forward({input}).toTensor();
+```
+
+`loadModel()` validates every library path against the model directory, loads
+the libraries in manifest order, and then deserializes the TorchScript model.
 
 ## Contributing
 
