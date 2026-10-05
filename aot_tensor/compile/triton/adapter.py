@@ -73,7 +73,7 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 
 def _collect_triton_spec(
-    fn: KernelInterface[List[Any]],
+    fn: KernelInterface[Callable[..., Any]],
     annotations: Dict[str, Annotation],
     *args: Any,
     **kwargs: Any,
@@ -107,7 +107,7 @@ def _collect_triton_spec(
 # =====================================================================
 
 
-def _ensure_multi_config_autotuner(fn: KernelInterface[List[Any]]) -> None:
+def _ensure_multi_config_autotuner(fn: KernelInterface[Callable[..., Any]]) -> None:
     """Duplicate a single ``@triton.autotune`` Config so Triton runs the
     benchmark path and populates ``Autotuner.cache``.
 
@@ -130,7 +130,7 @@ def _ensure_multi_config_autotuner(fn: KernelInterface[List[Any]]) -> None:
 
 
 def _unwrap_triton_fn(
-    fn: KernelInterface[List[Any]],
+    fn: KernelInterface[Callable[..., Any]],
 ) -> Callable[..., Any]:
     while isinstance(fn, KernelInterface):
         # pyre-ignore[16]: KernelInterface has `fn` attribute at runtime
@@ -164,7 +164,7 @@ _TRITON_INTERNAL_KWARGS: frozenset[str] = frozenset({"warmup", "grid"})
 
 
 def _resolve_call_args(
-    fn: KernelInterface[List[Any]],
+    fn: KernelInterface[Callable[..., Any]],
     *args: Any,
     **kwargs: Any,
 ) -> tuple[Callable[..., Any], dict[str, Any]]:
@@ -225,7 +225,7 @@ def _sample_satisfies_annotation(sample: Any, ann: Annotation) -> bool:
 
 
 def _annotation_conflicts_with_sample(
-    fn: KernelInterface[List[Any]],
+    fn: KernelInterface[Callable[..., Any]],
     annotations: Dict[str, Annotation],
     *args: Any,
     **kwargs: Any,
@@ -249,7 +249,7 @@ def _annotation_conflicts_with_sample(
 
 
 def infer_spec(  # noqa: C901
-    fn: KernelInterface[List[Any]],
+    fn: KernelInterface[Callable[..., Any]],
     annotations: Dict[str, Annotation],
     *args: Any,
     **kwargs: Any,
@@ -332,7 +332,7 @@ def infer_spec(  # noqa: C901
 
 
 def _resolve_autotune_cache(
-    fn: KernelInterface[List[Any]],
+    fn: KernelInterface[Callable[..., Any]],
     fn_name: str,
     fn_dir: str,
     overrides: dict[str, AutotuneCache],
@@ -359,7 +359,7 @@ def _resolve_autotune_cache(
             pickle.dump(autotuner.cache, data)
 
 
-def _extract_default_values(jit_fn: JITFunction[List[Any]]) -> dict[str, Any]:
+def _extract_default_values(jit_fn: JITFunction[Callable[..., Any]]) -> dict[str, Any]:
     """Extract default values from the Triton JIT function's Python signature.
 
     These defaults are emitted in the C++ op schema so TorchScript
@@ -622,7 +622,7 @@ class TritonAOTOperatorTransform(ast.NodeTransformer):
         super().__init__()
         self._kernel: Any = kernel
         self.gpu_target: GPUTarget = gpu_target or driver.active.get_current_target()
-        self._kernel_jit_fn: JITFunction[List[Any]] = unwrap_to_jit(kernel)
+        self._kernel_jit_fn: JITFunction[Callable[..., Any]] = unwrap_to_jit(kernel)
         self._kernel_autotuner: Optional[Autotuner] = try_get_autotuner(kernel)
         self._kernel_name: str = get_kernel_name(self._kernel_jit_fn)
         self._autotune_params: List[str] = compute_autotune_param_names(

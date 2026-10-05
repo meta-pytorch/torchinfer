@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from aot_tensor.compile.dtypes import CTYPES
 from aot_tensor.compile.triton.spec_processing import OpsUnit
@@ -180,7 +180,7 @@ class ConstantArg(ArgDescriptor):
 
 
 def build_arg_descriptors(
-    func: JITFunction[list[Any]],
+    func: JITFunction[Callable[..., Any]],
     unit: OpsUnit,
 ) -> list[ArgDescriptor]:
     """Build ordered arg descriptors from func arg names + OpsUnit invariants.

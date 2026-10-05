@@ -55,7 +55,7 @@ import logging
 import sys
 import typing
 from dataclasses import dataclass, field
-from typing import Any, cast, ClassVar
+from typing import Any, Callable, cast, ClassVar
 
 import torch
 
@@ -127,10 +127,10 @@ class AutotuneAttrs:
     # Hopper+ Thread Block Cluster size. Upstream maps it to
     # ``kernel.metadata.cluster_dims`` at compile time.
     num_ctas: int = field(default=1, metadata={"cubin_short": "cta"})
-    # Auto-TMA pass toggle (NVIDIA, beta triton). Per-variant: True/False produce
-    # different cubins. Flows to ``CUDAOptions.auto_tma`` under beta; a harmless
-    # ignored option under stable (no such field). Omitted from the cubin name
-    # when False (see gen_kernel_name) so default kernels are not renamed.
+    # Auto-TMA pass toggle (NVIDIA, Triton 3.8 and beta). Per-variant:
+    # True/False produce different cubins. Older 3.5 ignores this option.
+    # Omitted from the cubin name when False (see gen_kernel_name) so default
+    # kernels are not renamed.
     auto_tma: bool = field(default=False, metadata={"cubin_short": "atma"})
 
     @classmethod
@@ -381,7 +381,7 @@ class OpsUnit:
 
 def gen_compile_arg(
     spec: KernelSpec,
-    func: JITFunction[list[Any]],
+    func: JITFunction[Callable[..., Any]],
 ) -> tuple[ASTSource]:
     # ASTSource expects tuple-keyed dicts: {(idx,): value} for constants,
     # {(idx,): [[attr_name, attr_val], ...]} for attrs.  Tuple keys support

@@ -2,7 +2,7 @@
 
 
 import hashlib
-from typing import Any, cast, List, Optional
+from typing import Any, Callable, cast, Optional
 
 # @dep=//caffe2:torch
 # @manual=//triton:triton
@@ -35,7 +35,7 @@ def is_autotuner(obj: Any) -> bool:
     )
 
 
-def unwrap_to_jit(fn: Any) -> JITFunction[List[Any]]:
+def unwrap_to_jit(fn: Any) -> JITFunction[Callable[..., Any]]:
     """Peel ``KernelInterface`` layers (Heuristics / Autotuner / ...) until
     landing on the underlying ``JITFunction``. Raises if not reachable."""
     while isinstance(fn, KernelInterface) and not isinstance(fn, JITFunction):

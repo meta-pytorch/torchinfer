@@ -5,7 +5,7 @@
 import ast
 import re
 import unittest
-from typing import Any, cast, Dict, List, Optional, Tuple
+from typing import Any, Callable, cast, Dict, List, Optional, Tuple
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -313,7 +313,7 @@ class InferSpecTest(unittest.TestCase):
         timestamp_dtype: torch.dtype,
     ) -> List[Any]:
         spec = infer_spec(
-            cast(KernelInterface[List[Any]], _mock_position_kernel),
+            cast(KernelInterface[Callable[..., Any]], _mock_position_kernel),
             POSITION_ANNOTATIONS,
             SeqEmb=torch.empty((16, 8), dtype=torch.bfloat16),
             Offsets=torch.empty((3,), dtype=torch.int64),

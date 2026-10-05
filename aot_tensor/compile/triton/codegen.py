@@ -15,7 +15,7 @@ import os
 import textwrap
 from collections import Counter
 from dataclasses import dataclass, Field
-from typing import Any
+from typing import Any, Callable
 
 # @manual=//triton:triton
 import triton
@@ -358,7 +358,7 @@ def gen_launcher_params(
 
 
 def gen_launch_args(
-    func: JITFunction[list[Any]],
+    func: JITFunction[Callable[..., Any]],
     spec: KernelSpec,
 ) -> list[str]:
     """Generate kernel launch argument list (pointers to non-constant arguments)."""
@@ -429,7 +429,7 @@ def _launch_header_available() -> bool:
 
 def gen_launcher(
     kernel_name: str,
-    func: JITFunction[list[Any]],
+    func: JITFunction[Callable[..., Any]],
     kernel: Any,
     shared: int,
     warp_size: int,
@@ -722,7 +722,7 @@ _CALL_ARG_INDENT = _INDENT + _CONT
 
 
 def gen_guarded_calls(
-    func: JITFunction[list[Any]],
+    func: JITFunction[Callable[..., Any]],
     unit: OpsUnit,
     descriptors: list[ArgDescriptor],
     autotune_fields: tuple[Field[Any], ...],
@@ -816,7 +816,7 @@ def gen_failure_msg(
 
 
 def gen_selector(
-    func: JITFunction[list[Any]],
+    func: JITFunction[Callable[..., Any]],
     unit: OpsUnit,
     descriptors: list[ArgDescriptor],
     autotune_fields: tuple[Field[Any], ...],
@@ -902,7 +902,7 @@ def gen_torch_op_params(
 
 
 def gen_torch_op_schema(
-    func: JITFunction[list[Any]],
+    func: JITFunction[Callable[..., Any]],
     descriptors: list[ArgDescriptor],
     default_values: dict[str, Any],
     autotune_fields: tuple[Field[Any], ...],
@@ -911,7 +911,7 @@ def gen_torch_op_schema(
 
 
 def gen_torch_op(
-    func: JITFunction[list[Any]],
+    func: JITFunction[Callable[..., Any]],
     descriptors: list[ArgDescriptor],
     default_values: dict[str, Any],
     autotune_fields: tuple[Field[Any], ...],
@@ -1152,7 +1152,7 @@ def _infer_return_type(vals: tuple[Any, ...]) -> str:
 
 def generate_header_content(
     tuned_func: triton.runtime.autotuner.Autotuner | None,
-    func: JITFunction[list[Any]],
+    func: JITFunction[Callable[..., Any]],
     unit: OpsUnit,
     descriptors: list[ArgDescriptor],
     tuner_fallback: bool,
@@ -1175,7 +1175,7 @@ def generate_header_content(
 
 
 def generate_kernel_cpp_content(
-    func: JITFunction[list[Any]],
+    func: JITFunction[Callable[..., Any]],
     unit: OpsUnit,
     descriptors: list[ArgDescriptor],
     prefix: str,
@@ -1224,7 +1224,7 @@ def generate_kernel_cpp_content(
 
 
 def generate_torch_op_content(
-    func: JITFunction[list[Any]],
+    func: JITFunction[Callable[..., Any]],
     descriptors: list[ArgDescriptor],
     prefix: str,
     default_values: dict[str, Any],

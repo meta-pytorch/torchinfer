@@ -120,7 +120,9 @@ class AOTTMarker:
         cls.spec_collector = collector
 
 
-class TritonAOT(KernelInterface[List[Any]], AOTTMarker, metaclass=AOTTMarkerMeta):
+class TritonAOT(
+    KernelInterface[Callable[..., Any]], AOTTMarker, metaclass=AOTTMarkerMeta
+):
     """Wraps a Triton kernel for ahead-of-time compilation.
 
     Annotations specify dtype and optional value hints for kernel parameters:
@@ -136,10 +138,10 @@ class TritonAOT(KernelInterface[List[Any]], AOTTMarker, metaclass=AOTTMarkerMeta
 
     def __init__(
         self,
-        fn: KernelInterface[List[Any]],
+        fn: KernelInterface[Callable[..., Any]],
         annotations: Dict[str, AnnotationInput],
     ) -> None:
-        self.fn: KernelInterface[List[Any]] = fn
+        self.fn: KernelInterface[Callable[..., Any]] = fn
         self.annotations: Dict[str, Annotation] = {
             k: _normalize_annotation(v) for k, v in annotations.items()
         }
@@ -200,8 +202,8 @@ ALL_MARKERS: tuple[type[AOTTMarker], ...] = (TritonAOT, CuTeAOT)
 
 def triton_aot(
     annotations: Dict[str, AnnotationInput],
-) -> Callable[[KernelInterface[List[Any]]], TritonAOT]:
-    def decorator(fn: KernelInterface[List[Any]]) -> TritonAOT:
+) -> Callable[[KernelInterface[Callable[..., Any]]], TritonAOT]:
+    def decorator(fn: KernelInterface[Callable[..., Any]]) -> TritonAOT:
         return TritonAOT(fn, annotations)
 
     return decorator

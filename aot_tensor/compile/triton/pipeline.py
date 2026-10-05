@@ -176,7 +176,7 @@ def sigchld_handler(signum: int, frame: FrameType | None) -> None:
 
 
 def compile_to_cpp(
-    func: KernelInterface[list[Any]] | triton.runtime.autotuner.Autotuner,
+    func: KernelInterface[Callable[..., Any]] | triton.runtime.autotuner.Autotuner,
     base_specs: list[RawKernelSpec],
     install_dir: str,
     prefix: str,
