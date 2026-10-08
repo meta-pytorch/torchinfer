@@ -11,19 +11,39 @@ The public lowering API currently supports Triton kernels only.
 - CUDA Toolkit 13.0, including development headers
 - Clang 20 or newer with `--embed-dir` support
 - Python 3.12
-- PyTorch `2.14.0+cu130` with its matched Triton `3.8.0`
+- PyTorch 2.10 through 2.14 built for CUDA 13.0, with the Triton version it
+  pins
 - [nlohmann/json](https://github.com/nlohmann/json) headers (C++ loader only)
 
-This repository currently has no `pyproject.toml`, so expose the checkout and
-configure the compiler explicitly:
+Lowering, export, and loading are tested with PyTorch 2.10, 2.12, and 2.14.
+The generated libraries target the PyTorch 2.12 stable ABI, so load an exported
+model with PyTorch 2.12 or newer, or with the version that lowered it.
+
+## Installation
+
+From a clone of this repository:
 
 ```bash
-export PYTHONPATH="$PWD"
-export CUDA_HOME=/usr/local/cuda-13.0
-export CC=/usr/bin/clang-20
+pip install --extra-index-url https://download.pytorch.org/whl/cu130 .
+```
+
+This installs the `aot_tensor` package and its dependencies, including PyTorch
+2.14 built for CUDA 13.0 unless a supported PyTorch is already installed.
+For development, install in editable mode with
+`pip install -e . --config-settings editable_mode=compat`; the default editable
+mode can't load the packaged C++ templates.
+
+Lowering compiles C++ with Clang, and the generated libraries resolve PyTorch
+symbols at load time, so set:
+
+```bash
 export CXX=/usr/bin/clang++-20
 export TORCH_USE_RTLD_GLOBAL=YES
 ```
+
+Lowering uses the CUDA Toolkit of the `nvcc` on your `PATH`, or else
+`/usr/local/cuda`. If that is not CUDA 13.0, also set `CUDA_HOME`, for example
+`export CUDA_HOME=/usr/local/cuda-13.0`.
 
 ## Public API reference
 
@@ -128,8 +148,6 @@ triton_config = TritonCompileConfig(
 ```
 
 Keep the PyTorch-provided Triton version rather than upgrading it independently.
-Set `TORCH_USE_RTLD_GLOBAL=YES` before importing PyTorch so generated stable-ABI
-libraries can resolve the required runtime symbols.
 
 ### Load an exported model from C++
 

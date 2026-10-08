@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "torchinfer"
+version = "0.1.0"
+description = "Ahead-of-time compilation of GPU kernels in PyTorch models"
+readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = [
+    "packaging",
+    "pyre-extensions",
+    # Older setuptools compiles C++ with CC instead of CXX and cannot read
+    # this file's license field when lowering runs from the repository root.
+    "setuptools>=77.0.3",
+    "torch>=2.10,<2.15",
+    "triton",
+]
+
+[project.urls]
+Repository = "https://github.com/meta-pytorch/torchinfer"
+
+[tool.setuptools.packages.find]
+include = ["aot_tensor*"]
+exclude = ["*.tests", "*.tests.*"]
+
+# The C++ templates are read at lowering time.
+[tool.setuptools.package-data]
+"*" = ["*.cpp", "*.h"]
