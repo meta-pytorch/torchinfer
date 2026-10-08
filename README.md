@@ -45,6 +45,25 @@ Lowering uses the CUDA Toolkit of the `nvcc` on your `PATH`, or else
 `/usr/local/cuda`. If that is not CUDA 13.0, also set `CUDA_HOME`, for example
 `export CUDA_HOME=/usr/local/cuda-13.0`.
 
+## Quick start
+
+[`examples/vector_add.py`](examples/vector_add.py) marks a small Triton kernel
+with `triton_aot`, lowers a module that calls it, exports the result, and loads
+it back. From the repository root:
+
+```bash
+python examples/vector_add.py
+```
+
+After the compiler and lowering logs, it prints the following. The GPU target
+and the temporary directory depend on your machine.
+
+```text
+Lowered add_kernel for cuda:sm80 in /tmp/aot_tensor_vector_add_abcd1234
+Exported /tmp/aot_tensor_vector_add_abcd1234/model.pt
+Loaded model matches eager PyTorch: True
+```
+
 ## Public API reference
 
 The APIs and configuration example below describe the currently supported
@@ -62,7 +81,7 @@ Triton lowering path only.
 | API | Description |
 | --- | --- |
 | `TritonCompileConfig` | Configures the target GPU, generated operator namespace, optional autotune-cache overrides, and an optional target drift check. With no `gpu_target`, the attached GPU is detected automatically. |
-| `ExtensionBuildConfig` | Selects the C++ compiler and CUDA Toolkit, with optional additional Torch include and GPU library directories. |
+| `ExtensionBuildConfig` | Overrides the CUDA Toolkit root and adds Torch include and GPU library directories for building the generated extensions. Its `compiler_path` selects only the linker; set `CXX` to choose the C++ compiler. |
 | `LoweringOptions` | Combines the Triton and extension build configurations and controls post-lowering validation. |
 | `lower_model(module, example_inputs, *, work_dir, options)` | Collects kernel specializations from representative inputs, compiles native artifacts, rewrites the graph in place, optionally validates it, and returns a `LoweringResult`. |
 | `LoweringResult` | Contains the lowered graph module, artifact directory, artifact metadata, GPU target, Torch stable-ABI target, and operator namespace. |
@@ -80,72 +99,32 @@ Triton lowering path only.
 `lower_model()` currently accepts exactly one `TritonCompileConfig`. The
 public v0 lowering path does not yet support CuTeDSL kernels.
 
-## Enable AOT-Tensor
+## Lowering options
 
-AOT-Tensor is enabled for a lowering operation by passing `LoweringOptions` to
-`lower_model()`. The graph module must contain a call to a function wrapping an
-explicit `@triton_aot` kernel.
+`lower_model()` takes an optional `LoweringOptions`. By default it compiles for
+the attached GPU, registers the generated operators in the `aot_tensor`
+namespace, and runs the lowered module on every example input before
+returning. To set these explicitly:
 
 ```python
-from pathlib import Path
-
-from aot_tensor.api.exporting import export_model, ExportOptions
-from aot_tensor.api.loading import load_model
-from aot_tensor.api.lowering import lower_model, LoweringOptions
-from aot_tensor.build.extension_build_config import ExtensionBuildConfig
+from aot_tensor.api.lowering import LoweringOptions
 from aot_tensor.compile.triton.adapter import TritonCompileConfig
-
-
-# Let Triton detect the attached GPU and compile for that target.
-triton_config = TritonCompileConfig(
-    op_namespace="aot_tensor",
-)
-
-# Point extension compilation at the public CUDA Toolkit and Clang.
-build_config = ExtensionBuildConfig(
-    compiler_path="/usr/bin/clang++-20",
-    gpu_toolkit_path="/usr/local/cuda-13.0",
-)
-
-options = LoweringOptions(
-    dsl_configs=(triton_config,),
-    extension_build_config=build_config,
-    validate=True,
-)
-
-# graph_module is a torch.fx.GraphModule whose forward path invokes an
-# @triton_aot kernel. example_inputs is one tuple of representative CUDA inputs.
-example_inputs = (input_a, input_b)
-lowering = lower_model(
-    graph_module,
-    [example_inputs],
-    work_dir=Path("aott_artifact"),
-    options=options,
-)
-
-model_path = export_model(
-    lowering,
-    options=ExportOptions(validation_inputs=[example_inputs]),
-)
-loaded_model = load_model(model_path)
-```
-
-`work_dir` must be empty. With `validate=True`, AOT-Tensor runs the lowered
-module on every supplied input set before returning. `op_namespace` identifies
-the generated custom operators and should be unique when multiple independently
-compiled artifacts will be loaded into one process.
-
-To compile for a specific target instead of detecting the attached GPU, provide
-an explicit `GPUTarget`, for example:
-
-```python
 from triton.backends.compiler import GPUTarget
 
-triton_config = TritonCompileConfig(
-    gpu_target=GPUTarget(backend="cuda", arch=80, warp_size=32),
-    op_namespace="aot_tensor_sm80",
+options = LoweringOptions(
+    dsl_configs=(
+        TritonCompileConfig(
+            gpu_target=GPUTarget(backend="cuda", arch=80, warp_size=32),
+            op_namespace="aot_tensor_sm80",
+        ),
+    ),
+    validate=True,
 )
 ```
+
+Pass it as `lower_model(..., options=options)`. `work_dir` must be empty.
+`op_namespace` should be unique when multiple independently compiled artifacts
+will be loaded into one process.
 
 Keep the PyTorch-provided Triton version rather than upgrading it independently.
 
