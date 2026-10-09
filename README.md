@@ -64,6 +64,39 @@ Exported /tmp/aot_tensor_vector_add_abcd1234/model.pt
 Loaded model matches eager PyTorch: True
 ```
 
+## Recommendation model example
+
+[`examples/recsys_ranker.py`](examples/recsys_ranker.py) lowers a small
+DLRM-style ranking model from [`examples/recsys`](examples/recsys). It combines
+a PyTorch embedding table and output layer with two Triton kernels: one sums
+each user's variable-length item history, and an autotuned one runs the linear
+and ReLU of two MLP layers. From the repository root:
+
+```bash
+python examples/recsys_ranker.py
+```
+
+After the compiler and lowering logs, it prints:
+
+```text
+Lowered 2 Triton kernels for cuda:sm80 in /tmp/aot_tensor_recsys_ranker_abcd1234
+Exported /tmp/aot_tensor_recsys_ranker_abcd1234/model.pt
+Loaded model matches the PyTorch reference: True
+Loaded model matches it on a batch of 37: True
+```
+
+Write your own kernels the way the example does:
+
+- Give each `triton_aot` kernel and its launcher their own module. Lowering
+  accepts one `triton_aot` kernel per module.
+- In the module whose model calls a launcher, register the launcher with
+  `torch.fx.wrap` so tracing records it as one node.
+- In the launcher, assign the grid to a variable and launch the kernel by the
+  name of its `@triton.jit` function. A `lambda meta:` grid may read only
+  autotuned meta-parameters.
+- Keep launchers TorchScript-compatible: exporting compiles them with
+  TorchScript.
+
 ## Public API reference
 
 The APIs and configuration example below describe the currently supported
