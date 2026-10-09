@@ -1,0 +1,33 @@
+[[linter]]
+code = 'UFMT'
+include_patterns = [
+    '**/*.py',
+    '**/*.pyi',
+]
+exclude_patterns = [
+    '.venv/**',
+    'fb/**',
+]
+command = [
+    'python',
+    '-m',
+    'lintrunner_adapters',
+    'run',
+    'ufmt_linter',
+    '--',
+    '@{{PATHSFILE}}',
+]
+init_command = [
+    'python',
+    '-m',
+    'lintrunner_adapters',
+    'run',
+    'pip_init',
+    '--dry-run={{DRYRUN}}',
+    'black==25.11.0',
+    'ruff-api==0.2.1',
+    'stdlibs==2025.10.28',
+    'ufmt==2.9.1',
+    'usort==1.1.0',
+]
+is_formatter = true

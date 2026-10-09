@@ -7,24 +7,30 @@ We actively welcome your pull requests.
 2. If you've added code that should be tested, add tests.
 3. If you've changed APIs, update the documentation.
 4. Ensure the test suite passes.
-5. Make sure your code lints. You can use [lintrunner](https://github.com/pytorch/pytorch/wiki/lintrunner) to do so.
-    1. To set up:
-    ```
-    pip install lintrunner
-    lintrunner init
-    ```
-    2. To lint your local changes:
-    ```
-    lintrunner
-    ```
-    3. To format locally changed files:
-    ```
-    lintrunner f
-    ```
-    4. To lint all files:
-    ```
-    lintrunner --all-files
-    ```
+5. Make sure your Python code lints. From the repository root, install
+   [Lintrunner](https://github.com/pytorch/pytorch/wiki/lintrunner) and the
+   adapter required by `.lintrunner.toml`:
+
+   ```bash
+   pip install lintrunner lintrunner-adapters
+   lintrunner init
+   ```
+
+   Use a `pip` that installs into the same Python environment as `python` on
+   your `PATH`; the Lintrunner configuration invokes `python` to run the adapter.
+   Lint locally changed files, or check a specific Python file:
+
+   ```bash
+   lintrunner
+   lintrunner aot_tensor/api/loading.py
+   ```
+
+   Format locally changed Python files with `lintrunner f`. To check every
+   Python file, run `lintrunner --all-files`.
+
+   A warning about a missing `.lintrunner.private.toml` is harmless. This
+   configuration checks `.py` and `.pyi` files only; it does not format C++ or
+   run tests.
 6. If you haven't already, complete the Contributor License Agreement ("CLA").
 ## Contributor License Agreement ("CLA")
 In order to accept your pull request, we need you to submit a CLA. You only need

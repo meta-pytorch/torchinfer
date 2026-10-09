@@ -30,3 +30,7 @@ exclude = ["*.tests", "*.tests.*"]
 # The C++ templates are read at lowering time.
 [tool.setuptools.package-data]
 "*" = ["*.cpp", "*.h"]
+
+# Match fbcode's pyfmt formatter while retaining ufmt's usort import sorting.
+[tool.ufmt]
+formatter = "ruff-api"

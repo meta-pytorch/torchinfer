@@ -165,7 +165,7 @@ torchinfer.
 
 ## License
 
-torchinfer is BSD licensed, as found in the [LICENSE](LICENSE) file.
+torchinfer is licensed under the [BSD 3-Clause License](LICENSE).
 
 ## Contributors
 
