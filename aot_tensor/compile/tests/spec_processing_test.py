@@ -39,7 +39,6 @@ from aot_tensor.compile.triton.spec_processing import (
 from aot_tensor.compile.triton.utils import kernel_param_names
 from parameterized import parameterized
 from triton.backends.compiler import GPUTarget
-from triton.compiler.code_generator import ASTFunction
 
 
 @triton.jit
@@ -129,19 +128,14 @@ class GenCompileArgTest(unittest.TestCase):
         )
 
         result = gen_compile_arg(spec, _addmm_fwd)
-        ast_source = result[0]
-
-        ast_function = ASTFunction(
-            ret_types=[],
-            arg_types=[],
-            constants=ast_source.constants,
-            attrs=ast_source.attrs,
-        )
+        # Triton's ASTFunction stores these attrs unchanged; read them directly
+        # because upstream and Meta builds construct ASTFunction differently.
+        attrs = result[0].attrs
 
         triton_would_set_divisibility_for: List[int] = []
         for idx in spec.divisible_by_16:
             path = (idx,)
-            attr_specs = ast_function.attrs.get(path, [])
+            attr_specs = attrs.get(path, [])
             if attr_specs:
                 for attr_name, _ in attr_specs:
                     if attr_name == "tt.divisibility":

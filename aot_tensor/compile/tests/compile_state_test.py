@@ -4,7 +4,7 @@
 import os
 import unittest
 from typing import Callable
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from aot_tensor.compile.adapter_base import DslSpecStore
 from aot_tensor.compile.compile_state import (
@@ -24,6 +24,8 @@ class _ResetStateTest(unittest.TestCase):
 
     def setUp(self) -> None:
         get_aott_compile_state().reset()
+        # reset() keeps registered DSL stores, so isolate them separately.
+        self.enterContext(patch.dict(get_aott_compile_state().dsl_state, clear=True))
 
     def tearDown(self) -> None:
         get_aott_compile_state().reset()

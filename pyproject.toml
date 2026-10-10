@@ -20,6 +20,9 @@ dependencies = [
     "triton",
 ]
 
+[project.optional-dependencies]
+test = ["parameterized", "pytest"]
+
 [project.urls]
 Repository = "https://github.com/meta-pytorch/torchinfer"
 
@@ -34,3 +37,11 @@ exclude = ["*.tests", "*.tests.*"]
 # Match fbcode's pyfmt formatter while retaining ufmt's usort import sorting.
 [tool.ufmt]
 formatter = "ruff-api"
+
+# Test files share basenames across directories that have no __init__.py, so
+# import them by path, and test this checkout rather than an installed copy.
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"
+python_files = ["test_*.py", "*_test.py", "*_tests.py"]
+pythonpath = ["."]
+testpaths = ["aot_tensor"]

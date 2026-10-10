@@ -3,6 +3,7 @@
 
 import unittest
 from typing import Any
+from unittest.mock import patch
 
 from aot_tensor.build.extension_build_config import ExtensionBuildConfig
 from aot_tensor.compile.adapter_base import AOTTAdapter, CompileContext, DslSpecStore
@@ -108,6 +109,9 @@ class CompileSessionTest(unittest.TestCase):
 
     def setUp(self) -> None:
         get_aott_compile_state().reset()
+        # reset() keeps registered DSL stores, so without this a fake adapter one
+        # test registers is still compiled by every later session in the process.
+        self.enterContext(patch.dict(get_aott_compile_state().dsl_state, clear=True))
 
     def tearDown(self) -> None:
         get_aott_compile_state().reset()

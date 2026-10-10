@@ -6,7 +6,14 @@ We actively welcome your pull requests.
 1. Fork the repo and create your branch from `main`.
 2. If you've added code that should be tested, add tests.
 3. If you've changed APIs, update the documentation.
-4. Ensure the test suite passes.
+4. Ensure the test suite passes. From the repository root, install the package
+   with its test dependencies and run pytest:
+
+   ```bash
+   pip install --extra-index-url https://download.pytorch.org/whl/cu130 \
+     -e ".[test]" --config-settings editable_mode=compat
+   pytest
+   ```
 5. Make sure your Python code lints. From the repository root, install
    [Lintrunner](https://github.com/pytorch/pytorch/wiki/lintrunner) and the
    adapter required by `.lintrunner.toml`:
