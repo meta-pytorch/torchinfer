@@ -901,13 +901,21 @@ def gen_torch_op_params(
     def gen_str_wrap(value: Any) -> Any:
         return f'\\"{value}\\"' if isinstance(value, str) else value
 
-    def gen_default_str(arg: str) -> str:
-        return (
-            f" = {gen_str_wrap(default_values[arg])}" if arg in default_values else ""
-        )
+    def gen_default_str(d: ArgDescriptor) -> str:
+        if d.name not in default_values:
+            return ""
+        value = default_values[d.name]
+        # A bool constexpr the launcher never passes is compiled into an int
+        # slot. Its Python default would be a bool IValue there, which the op
+        # cannot read as an int.
+        if isinstance(value, bool) and not (
+            isinstance(d, ConstantArg) and d.python_type is bool
+        ):
+            value = int(value)
+        return f" = {gen_str_wrap(value)}"
 
     for d in descriptors:
-        args.append(d.torch_schema_param(gen_default_str(d.name)))
+        args.append(d.torch_schema_param(gen_default_str(d)))
     py_types = AutotuneAttrs.field_python_types()
     for f in autotune_fields:
         args.append(f"{py_types[f.name].__name__} {f.name}={f.default}")

@@ -979,6 +979,25 @@ class GenTorchOpParamsTest(unittest.TestCase):
         for f in AutotuneAttrs.fields_for(backend):
             self.assertIn(f"{f.name}={f.default}", result)
 
+    @parameterized.expand(
+        [
+            # A bool constexpr the launcher omits is compiled into an int slot.
+            ("int_slot", int, False, "int FLAG = 0"),
+            ("int_slot_true", int, True, "int FLAG = 1"),
+            ("bool_slot", bool, False, "bool FLAG = False"),
+        ]
+    )
+    def test_bool_default_matches_slot_type(
+        self, _name: str, python_type: type[Any], default: bool, expected: str
+    ) -> None:
+        descriptors: List[ArgDescriptor] = [
+            ConstantArg(name="FLAG", index=0, python_type=python_type)
+        ]
+
+        result = gen_torch_op_params(descriptors, {"FLAG": default}, ())
+
+        self.assertEqual(expected, result)
+
 
 class GenSelectorParamsTest(unittest.TestCase):
     """Tests for ``gen_selector_params`` (direct, not via gen_selector_proto)."""
