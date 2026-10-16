@@ -70,6 +70,7 @@ from aot_tensor.compile.spec_conversion import (
     signature_list_to_dict,
     SignatureElement,
 )
+from aot_tensor.compile.triton.compat import hip_option_default
 from aot_tensor.compile.triton.utils import cfg_constexpr_keys, unwrap_to_jit
 from triton import knobs
 from triton.backends.compiler import BaseBackend, GPUTarget
@@ -134,9 +135,16 @@ class AutotuneAttrs:
     # ``cubin_short`` metadata = short prefix used in cubin file names
     num_warps: int = field(default=4, metadata={"cubin_short": "w"})
     num_stages: int = field(default=3, metadata={"cubin_short": "s"})
-    matrix_instr_nonkdim: int = field(default=0, metadata={"cubin_short": "matrix"})
-    waves_per_eu: int = field(default=1, metadata={"cubin_short": "wave"})
-    kpack: int = field(default=1, metadata={"cubin_short": "kpack"})
+    matrix_instr_nonkdim: int = field(
+        default=hip_option_default("matrix_instr_nonkdim"),
+        metadata={"cubin_short": "matrix"},
+    )
+    waves_per_eu: int = field(
+        default=hip_option_default("waves_per_eu"), metadata={"cubin_short": "wave"}
+    )
+    kpack: int = field(
+        default=hip_option_default("kpack"), metadata={"cubin_short": "kpack"}
+    )
     # Hopper+ Thread Block Cluster size. Upstream maps it to
     # ``kernel.metadata.cluster_dims`` at compile time.
     num_ctas: int = field(default=1, metadata={"cubin_short": "cta"})

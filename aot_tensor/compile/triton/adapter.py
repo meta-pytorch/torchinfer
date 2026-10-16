@@ -363,8 +363,9 @@ def _resolve_autotune_cache(
     # the compile itself never reads this file back.
     if is_non_empty_mapping_of_type(autotuner.cache, Config):
         with open(f"{fn_dir}/{fn_name}_autotune_cache", "wb") as data:
+            # Triton 3.8's ``_AutotuneCache`` pickles to an empty dict.
             # @lint-ignore PYTHONPICKLEISBAD
-            pickle.dump(autotuner.cache, data)
+            pickle.dump(dict(autotuner.cache), data)
 
 
 def _extract_default_values(jit_fn: JITFunction[Callable[..., Any]]) -> dict[str, Any]:

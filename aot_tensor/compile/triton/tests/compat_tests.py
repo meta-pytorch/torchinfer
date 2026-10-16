@@ -2,17 +2,23 @@
 
 """Unit tests for aot_tensor.compile.triton.compat module."""
 
+import sys
 import types
 import unittest
+from unittest import mock
 from unittest.mock import MagicMock
 
 from aot_tensor.compile.triton.compat import (
     _get_num_ctas,
     get_kernel_name,
     get_scratch_parameters,
+    hip_option_default,
     version_gte,
 )
 from parameterized import parameterized
+from triton.backends.amd.compiler import HIPOptions
+
+_HIP_OPTION_NAMES: list[str] = ["matrix_instr_nonkdim", "waves_per_eu", "kpack"]
 
 
 class VersionGteTest(unittest.TestCase):
@@ -28,6 +34,23 @@ class VersionGteTest(unittest.TestCase):
     )
     def test_version_gte(self, version: str, target: str, expected: bool) -> None:
         self.assertEqual(version_gte(version, target), expected)
+
+
+class HipOptionDefaultTest(unittest.TestCase):
+    def test_reads_upstream_hip_options(self) -> None:
+        for name in _HIP_OPTION_NAMES:
+            with self.subTest(name=name):
+                self.assertEqual(
+                    hip_option_default(name),
+                    HIPOptions.__dataclass_fields__[name].default,
+                )
+
+    def test_falls_back_without_amd_backend(self) -> None:
+        with mock.patch.dict(sys.modules, {"triton.backends.amd.compiler": None}):
+            self.assertEqual(
+                {name: hip_option_default(name) for name in _HIP_OPTION_NAMES},
+                {"matrix_instr_nonkdim": 0, "waves_per_eu": 1, "kpack": 1},
+            )
 
 
 class GetKernelNameTest(unittest.TestCase):
@@ -78,16 +101,13 @@ class GetNumCtasTest(unittest.TestCase):
 class GetScratchParametersTest(unittest.TestCase):
     @parameterized.expand(
         [
-            ("cuda_zero_size", "cuda", 0),
-            ("hip_nonzero_size", "hip", 128),  # HIP skips TMA alloc.
-            ("amd_fork_missing_field", "cuda", None),
+            ("zero_size", 0),
+            ("amd_fork_missing_field", None),
         ]
     )
-    def test_null_path(
-        self, _label: str, backend: str, global_scratch_size: int | None
-    ) -> None:
+    def test_null_path(self, _label: str, global_scratch_size: int | None) -> None:
         declarations, arg_pointers = get_scratch_parameters(
-            _mock_kernel(global_scratch_size), backend
+            _mock_kernel(global_scratch_size)
         )
         self.assertIn("CUdeviceptr global_scratch = 0;", declarations)
         self.assertNotIn("aoti_torch_empty_strided", declarations)
@@ -95,8 +115,8 @@ class GetScratchParametersTest(unittest.TestCase):
         self.assertNotIn("global_scratch_num_ctas", declarations)
         self.assertEqual(arg_pointers, ["&global_scratch", "&profile_scratch"])
 
-    def test_cuda_with_tma_scratch_emits_empty_strided_block(self) -> None:
-        declarations, arg_pointers = get_scratch_parameters(_mock_kernel(128), "cuda")
+    def test_nonzero_size_emits_empty_strided_block(self) -> None:
+        declarations, arg_pointers = get_scratch_parameters(_mock_kernel(128))
         for marker in (
             "constexpr int64_t global_scratch_per_program = 128;",
             "constexpr int64_t global_scratch_num_ctas = 1;",
@@ -128,8 +148,7 @@ class GetScratchParametersTest(unittest.TestCase):
         expected_num_ctas: int,
     ) -> None:
         declarations, _ = get_scratch_parameters(
-            _mock_kernel(global_scratch_size=128, cluster_dims=cluster_dims),
-            "cuda",
+            _mock_kernel(global_scratch_size=128, cluster_dims=cluster_dims)
         )
         self.assertIn(
             f"constexpr int64_t global_scratch_num_ctas = {expected_num_ctas};",

@@ -26,6 +26,31 @@ def version_gte(version: str, target: str) -> bool:
     return Version(version) >= Version(target)
 
 
+# Triton 3.5 ``HIPOptions`` defaults, for builds that do not ship the AMD
+# backend (triton-mtia, triton-cpu, conda).
+_FALLBACK_HIP_OPTION_DEFAULTS: dict[str, int] = {
+    "matrix_instr_nonkdim": 0,
+    "waves_per_eu": 1,
+    "kpack": 1,
+}
+
+
+def hip_option_default(name: str) -> int:
+    """Upstream ``HIPOptions`` default for ``name``.
+
+    Channel-dependent (e.g. ``waves_per_eu``) and part of every HIP kernel
+    name, so it is read from the AMD backend rather than hard-coded. Falls
+    back to the Triton 3.5 values when the AMD backend is not importable.
+    """
+    try:
+        from triton.backends.amd.compiler import HIPOptions
+    except ImportError:
+        return _FALLBACK_HIP_OPTION_DEFAULTS[name]
+    default = HIPOptions.__dataclass_fields__[name].default
+    assert isinstance(default, int), f"HIPOptions.{name} default: {default!r}"
+    return default
+
+
 def get_kernel_name(jit_fn: JITFunction[Any]) -> str:
     """
     Get the simple kernel name from a JITFunction.
@@ -65,19 +90,22 @@ def _get_num_ctas(kernel: Any) -> int:
     return math.prod(_get_cluster_dims(kernel))
 
 
-def get_scratch_parameters(kernel: Any, backend: str = "cuda") -> tuple[str, list[str]]:
+def get_scratch_parameters(kernel: Any) -> tuple[str, list[str]]:
     """Emit C++ launcher declarations + arg pointers for the two scratch
     slots Triton 3.5+ kernels expect in their ABI.
 
     `global_scratch` holds on-device TMA descriptors (or any other state
-    Triton materialises in global memory). For cuda + non-zero size we
+    Triton materialises in global memory). For non-zero size we
     allocate via the stable C shim `aoti_torch_empty_strided` (error-checked
     by `STABLE_TORCH_ERROR_CODE_CHECK`, both from `torch/csrc/stable/macros.h`)
     and wrap in `torch::stable::Tensor` (stable-ABI replacement for AOT
     Inductor's `RAIIAtenTensorHandle`; same RAII delete via
-    `aoti_torch_delete_tensor_object`). Other cases pass a null pointer.
+    `aoti_torch_delete_tensor_object`); zero size passes a null pointer.
+    The block is backend-agnostic: HIP launchers are hipified, and upstream's
+    AMD driver allocates the same `grid * global_scratch_size` bytes.
     Total bytes scale by `num_ctas` (product of cluster dims): every CTA in a
-    Hopper cluster runs `tl.make_tensor_descriptor` independently.
+    Hopper cluster runs `tl.make_tensor_descriptor` independently. AMD has no
+    cluster dims, so `num_ctas` is 1 there and sizing matches upstream.
     AMD-fork builds may omit `global_scratch_size` from `KernelMetadata`;
     `getattr(..., 0)` keeps them on the null path. `profile_scratch` (proton)
     is always null since AOT-T does not enable proton.
@@ -85,8 +113,9 @@ def get_scratch_parameters(kernel: Any, backend: str = "cuda") -> tuple[str, lis
     declarations = []
     arg_pointers = []
 
-    global_scratch_size = getattr(kernel.metadata, "global_scratch_size", 0)
-    if backend == "cuda" and global_scratch_size > 0:
+    global_scratch_size = getattr(kernel.metadata, "global_scratch_size", 0) or 0
+    # TODO(T293217907): cover the HIP scratch path with an MI350 test.
+    if global_scratch_size > 0:
         num_ctas = _get_num_ctas(kernel)
         declarations.extend(
             [

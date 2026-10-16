@@ -3,7 +3,9 @@
 # pyre-strict
 
 import ast
+import pickle
 import re
+import tempfile
 import unittest
 from typing import Any, Callable, cast, Dict, List, Optional, Tuple
 from unittest.mock import MagicMock, patch
@@ -25,6 +27,7 @@ from aot_tensor.compile.triton.adapter import (
     _ensure_multi_config_autotuner,
     _extract_default_values,
     _inferred_has_perf_advantage,
+    _resolve_autotune_cache,
     _resolve_call_args,
     _sample_satisfies_annotation,
     _warn_if_host_mismatches_target,
@@ -1029,3 +1032,26 @@ class AutotuneParamsExplicitOnAllBackendOptsTest(unittest.TestCase):
             )
         mock_driver.active.get_current_target.assert_called_once()
         self.assertEqual(transform.gpu_target.backend, "cuda")
+
+
+class _ReducesToEmptyDict(dict):
+    """Pickles and deep-copies to ``{}``, like Triton 3.8's ``_AutotuneCache``."""
+
+    def __reduce__(self) -> tuple[type[dict], tuple[()]]:
+        return (dict, ())
+
+
+class ResolveAutotuneCacheTest(unittest.TestCase):
+    def test_dump_keeps_entries_of_a_cache_that_pickles_to_empty(self) -> None:
+        cache = _ReducesToEmptyDict({(64,): triton.Config({"BLOCK": 64}, num_warps=4)})
+        # @lint-ignore PYTHONPICKLEISBAD
+        self.assertEqual(pickle.loads(pickle.dumps(cache)), {})
+        with tempfile.TemporaryDirectory() as fn_dir:
+            _resolve_autotune_cache(MockAutotuner(cache=cache), "k", fn_dir, {})
+            with open(f"{fn_dir}/k_autotune_cache", "rb") as f:
+                # @lint-ignore PYTHONPICKLEISBAD
+                dumped = pickle.load(f)
+        self.assertEqual(
+            {k: (c.kwargs, c.num_warps) for k, c in dumped.items()},
+            {(64,): ({"BLOCK": 64}, 4)},
+        )

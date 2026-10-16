@@ -20,6 +20,7 @@ from aot_tensor.compile.spec_conversion import (
     SignatureConstraints,
     SignatureElement,
 )
+from aot_tensor.compile.triton.compat import TRITON_VERSION, version_gte
 from aot_tensor.compile.triton.spec_processing import (
     _autotune_specs,
     _check_constants_consistency,
@@ -48,7 +49,10 @@ from aot_tensor.compile.triton.utils import (
 from parameterized import parameterized
 from triton import knobs
 from triton.backends import backends as triton_backends
+from triton.backends.amd.compiler import HIPOptions
 from triton.backends.compiler import GPUTarget
+
+_HIP_DEFAULT_WAVES_PER_EU: int = HIPOptions.__dataclass_fields__["waves_per_eu"].default
 
 
 @triton.jit
@@ -1028,8 +1032,22 @@ class AutotuneAttrsFromCfgTest(unittest.TestCase):
         cfg = triton.Config({"BLOCK_M": 64}, num_warps=4, num_stages=3)
         attrs = AutotuneAttrs.from_cfg(cfg, AutotuneAttrs.fields_for("hip"))
         self.assertEqual(attrs.matrix_instr_nonkdim, 0)  # AutotuneAttrs default
-        self.assertEqual(attrs.waves_per_eu, 1)
+        self.assertEqual(attrs.waves_per_eu, _HIP_DEFAULT_WAVES_PER_EU)
         self.assertEqual(attrs.kpack, 1)
+
+    def test_amd_defaults_match_upstream_hip_options(self) -> None:
+        defaults = AutotuneAttrs()
+        for name in AutotuneAttrs.AMD_ONLY_FIELDS:
+            with self.subTest(field=name):
+                self.assertEqual(
+                    getattr(defaults, name),
+                    HIPOptions.__dataclass_fields__[name].default,
+                )
+        # Legacy defaults are part of every 3.5 HIP kernel name.
+        self.assertEqual(
+            (defaults.matrix_instr_nonkdim, defaults.waves_per_eu, defaults.kpack),
+            (0, 0, 1) if version_gte(TRITON_VERSION, "3.8") else (0, 1, 1),
+        )
 
     def test_from_cfg_kwargs_wins_over_attr(self) -> None:
         """When the same name appears in both kwargs and attr, kwargs takes priority."""
@@ -1201,7 +1219,7 @@ class AutotuneSpecsTest(unittest.TestCase):
             # hip: AMD opts in cfg.kwargs flow into spec.autotune
             ("hip", "gfx942", 16, 2, 2),
             # cuda: AMD opts dropped (not in fields_for("cuda")) -> AutotuneAttrs defaults
-            ("cuda", 90, 0, 1, 1),
+            ("cuda", 90, 0, _HIP_DEFAULT_WAVES_PER_EU, 1),
         ]
     )
     def test_amd_backend_opt_routing(

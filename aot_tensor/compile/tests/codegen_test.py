@@ -1637,6 +1637,7 @@ class GenLauncherLevel1Test(unittest.TestCase):
         kernel = MagicMock()
         kernel.metadata.name = "test_kernel_0d1d2"
         kernel.metadata.shared = 0
+        kernel.metadata.num_warps = 4
         kernel.metadata.global_scratch_size = 0
         # Explicit trivial cluster: MagicMock would otherwise auto-create a
         # truthy ``cluster_dims`` attr, defeating the ``getattr(..., None)``
@@ -1694,7 +1695,6 @@ class GenLauncherLevel1Test(unittest.TestCase):
             kernel_name="test_kernel_sm80",
             func=self._simple_kernel,
             kernel=self._make_kernel(with_launcher_src=with_launcher_src),
-            shared=0,
             warp_size=32,
             spec=self._make_spec(),
             descriptors=self._make_descriptors(),
@@ -1730,7 +1730,6 @@ class GenLauncherLevel1Test(unittest.TestCase):
             kernel_name="test_kernel_sm90",
             func=self._simple_kernel,
             kernel=kernel,
-            shared=0,
             warp_size=32,
             spec=self._make_spec(),
             descriptors=self._make_descriptors(),
@@ -1758,7 +1757,6 @@ class GenLauncherLevel1Test(unittest.TestCase):
             kernel_name="test_kernel_sm80",
             func=self._simple_kernel,
             kernel=self._make_kernel(with_launcher_src=True),
-            shared=0,
             warp_size=32,
             spec=self._make_spec(),
             descriptors=self._make_descriptors(),
@@ -1809,7 +1807,6 @@ class GenLauncherLevel1Test(unittest.TestCase):
                     kernel_name=name,
                     func=self._simple_kernel,
                     kernel=kernel,
-                    shared=0,
                     warp_size=32,
                     spec=self._make_spec(),
                     descriptors=self._make_descriptors(),
@@ -1841,6 +1838,7 @@ class GenLauncherClusterTest(unittest.TestCase):
         self,
         cluster_dims: tuple[int, int, int] | None = (1, 1, 1),
         global_scratch_size: int = 0,
+        num_warps: int = 4,
     ) -> Any:
         # ``metadata`` is a SimpleNamespace (not MagicMock) so the
         # ``getattr(..., (1,1,1))`` fallback isn't silently defeated by
@@ -1849,6 +1847,8 @@ class GenLauncherClusterTest(unittest.TestCase):
         attrs: dict[str, Any] = {
             "global_scratch_size": global_scratch_size,
             "profile_scratch_size": 0,
+            "num_warps": num_warps,
+            "shared": 1024,
         }
         if cluster_dims is not None:
             attrs["cluster_dims"] = cluster_dims
@@ -1860,6 +1860,7 @@ class GenLauncherClusterTest(unittest.TestCase):
         cluster_dims: tuple[int, int, int] | None = (1, 1, 1),
         backend: str = "cuda",
         global_scratch_size: int = 0,
+        metadata_num_warps: int | None = None,
     ) -> str:
         compiler = CompilerTest()
         spec = compiler._create_mock_unit().specs[0]
@@ -1867,8 +1868,11 @@ class GenLauncherClusterTest(unittest.TestCase):
         return gen_launcher(
             kernel_name="_addmm_fwd",
             func=compiler._create_mock_func(),
-            kernel=self._mock_kernel(cluster_dims, global_scratch_size),
-            shared=1024,
+            kernel=self._mock_kernel(
+                cluster_dims,
+                global_scratch_size,
+                metadata_num_warps or spec.autotune.num_warps,
+            ),
             warp_size=32,
             spec=spec,
             descriptors=compiler._create_descriptors(),
@@ -1896,6 +1900,31 @@ class GenLauncherClusterTest(unittest.TestCase):
         self.assertNotIn("CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION", cpp)
         # Parity with cluster path: ``warp_size * num_warps``.
         self.assertIn(f"32 * {self._spec.autotune.num_warps}", cpp)
+
+    @parameterized.expand([("cuda",), ("hip",)])
+    def test_legacy_block_size_and_smem_from_metadata(self, backend: str) -> None:
+        """Warp specialization records a larger launched warp count in
+        ``metadata.num_warps`` than the requested ``spec.autotune.num_warps``."""
+        cpp = self._gen_for(backend=backend, metadata_num_warps=12)
+        self.assertNotEqual(self._spec.autotune.num_warps, 12)
+        self.assertIn(
+            "cuLaunchKernel(func, grid.x, grid.y, grid.z, 32 * 12, 1, 1, 1024,", cpp
+        )
+
+    def test_hip_global_scratch_is_allocated(self) -> None:
+        cpp = self._gen_for(backend="hip", global_scratch_size=128)
+        for marker in (
+            "constexpr int64_t global_scratch_per_program = 128;",
+            "constexpr int64_t global_scratch_num_ctas = 1;",
+            "STABLE_TORCH_ERROR_CODE_CHECK(aoti_torch_empty_strided",
+        ):
+            self.assertIn(marker, cpp)
+        self.assertNotIn("CUdeviceptr global_scratch = 0;", cpp)
+
+    def test_cluster_block_size_from_metadata(self) -> None:
+        cpp = self._gen_for(cluster_dims=(2, 1, 1), metadata_num_warps=12)
+        self.assertIn("_launch_config.blockDimX = 32 * 12;", cpp)
+        self.assertIn("_launch_config.sharedMemBytes = 1024;", cpp)
 
     @parameterized.expand(
         [

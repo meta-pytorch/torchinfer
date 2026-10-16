@@ -144,7 +144,6 @@ def spec_gen(
             kernel_name,
             func,
             kernel,
-            metadata_shared,
             gpu_target.warp_size,
             spec,
             descriptors,

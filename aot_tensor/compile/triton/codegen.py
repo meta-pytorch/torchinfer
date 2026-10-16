@@ -374,20 +374,19 @@ def gen_launch_args(
     return args
 
 
-def _gen_launch_call(
-    kernel: Any,
-    backend: str,
-    shared: int,
-    warp_size: int,
-    num_warps: int,
-) -> str:
+def _gen_launch_call(kernel: Any, backend: str, warp_size: int) -> str:
     """C++ launch call. Cluster path on cuda emits ``cuLaunchKernelEx`` +
     ``CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION``; otherwise legacy
     ``cuLaunchKernel``. User grid is in *programs* — multiply by
     ``cluster_dims`` to get the CTA grid CUDA expects (mirrors upstream
     Triton's C ``_launch``).
+
+    Block size and dynamic SMEM come from ``kernel.metadata``: the compiler
+    seeds ``num_warps`` from the options and warp specialization overwrites it
+    with the total launched warp count (NVIDIA and AMD).
     """
-    block_x = f"{warp_size} * {num_warps}"
+    shared = kernel.metadata.shared
+    block_x = f"{warp_size} * {kernel.metadata.num_warps}"
     cluster_dims = _get_cluster_dims(kernel)
     if backend != "cuda" or tuple(cluster_dims) == (1, 1, 1):
         return (
@@ -434,7 +433,6 @@ def gen_launcher(
     kernel_name: str,
     func: JITFunction[Callable[..., Any]],
     kernel: Any,
-    shared: int,
     warp_size: int,
     spec: KernelSpec,
     descriptors: list[ArgDescriptor],
@@ -471,7 +469,7 @@ def gen_launcher(
         # emits the local CUdeviceptr vars we forward by value to the call
         # below. (scratch_args is the legacy-fallback void*[] form and is
         # unused on this path.)
-        scratch_declarations, _ = get_scratch_parameters(kernel, backend)
+        scratch_declarations, _ = get_scratch_parameters(kernel)
 
         # Build the args struct initializer: { (CUdeviceptr)ptr_arg, scalar_arg, ... }
         struct_fields = []
@@ -520,7 +518,7 @@ def gen_launcher(
     params = gen_launcher_params(descriptors, spec.signature, indent=_CONT)
     args = gen_launch_args(func, spec)
 
-    scratch_declarations, scratch_args = get_scratch_parameters(kernel, backend)
+    scratch_declarations, scratch_args = get_scratch_parameters(kernel)
     args.extend(scratch_args)
 
     # compat.py joins these at its own indent;
@@ -529,9 +527,7 @@ def gen_launcher(
         line.strip() for line in scratch_declarations.splitlines()
     )
     args_str = (",\n" + " " * (_INDENT + _CONT)).join(args)
-    launch_call = _gen_launch_call(
-        kernel, backend, shared, warp_size, spec.autotune.num_warps
-    )
+    launch_call = _gen_launch_call(kernel, backend, warp_size)
 
     return _LAUNCHER_LEGACY_TMPL.format(
         kernel_name=kernel_name,
