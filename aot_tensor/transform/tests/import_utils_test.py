@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 from aot_tensor.transform.import_utils import (
     _is_extern_module,
+    drop_imports,
     get_original_import_header,
     rewrite_package_imports,
 )
@@ -107,3 +108,19 @@ class RewritePackageImportsTest(unittest.TestCase):
     def test_empty_header(self) -> None:
         result = rewrite_package_imports("", self._make_importer(["torch"]))
         self.assertEqual(result, "")
+
+
+class DropImportsTest(unittest.TestCase):
+    def test_drops_roots_and_their_submodules_only(self) -> None:
+        header = (
+            "import os\n"
+            "import cutlass.cute as cute\n"
+            "import cutlass, torch\n"
+            "import cutlassx\n"
+            "from cuda.bindings import driver\n"
+            "from typing import Any\n"
+        )
+        self.assertEqual(
+            drop_imports(header, ("cutlass", "cuda")),
+            "import os\nimport torch\nimport cutlassx\nfrom typing import Any\n",
+        )

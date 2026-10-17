@@ -106,3 +106,22 @@ def rewrite_package_imports(
         parts.append("# Imports resolved from torch package via _package_importer")
         parts.append("\n".join(from_package))
     return "\n".join(parts) + "\n" if parts else ""
+
+
+def drop_imports(import_header: str, roots: tuple[str, ...]) -> str:
+    """Drop imports of ``roots`` and their submodules. The lowered wrapper
+    calls ``torch.ops``, so it must not need the DSL packages at serving time."""
+
+    def dropped(module: str) -> bool:
+        return any(module == root or module.startswith(f"{root}.") for root in roots)
+
+    kept: list[str] = []
+    for node in ast.parse(import_header).body:
+        if isinstance(node, ast.Import):
+            node.names = [alias for alias in node.names if not dropped(alias.name)]
+            if not node.names:
+                continue
+        elif isinstance(node, ast.ImportFrom) and dropped(node.module or ""):
+            continue
+        kept.append(ast.unparse(node))
+    return "\n".join(kept) + ("\n" if kept else "")

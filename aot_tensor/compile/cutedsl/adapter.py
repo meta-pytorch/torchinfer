@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import ast
 import logging
 import os
 from typing import Any
@@ -17,12 +16,13 @@ from aot_tensor.compile.compile_state import (
     register_active,
 )
 from aot_tensor.compile.cutedsl.pipeline import compile_cutedsl_to_cpp
-from aot_tensor.constants import CUTEDSL, DEFAULT_OP_NAMESPACE_PREFIX
+from aot_tensor.constants import CUTEDSL
 from aot_tensor.cute_specs import sample_spec_and_hash
+from aot_tensor.transform.import_utils import drop_imports
+from aot_tensor.transform.marker_call_transform import MarkerCallTransform
 from aot_tensor.transform.wrapper_codegen_utils import (
     find_sole_marker_in_globals,
     generate_wrapper_files_skeleton,
-    strip_jit_unused_decorator,
 )
 from aot_tensor.types import CuTeAOT, get_cutedsl_aot_dir_name
 from torch import package
@@ -155,120 +155,13 @@ def get_cutedsl_eager_cache() -> dict[Any, Any]:
 
 def _filter_cutedsl_runtime_imports(import_header: str) -> str:
     """Drop CuTeDSL-only Python imports from generated runtime wrappers."""
-    tree = ast.parse(import_header)
-    kept: list[str] = []
-    for node in tree.body:
-        if isinstance(node, ast.Import):
-            aliases = [
-                alias
-                for alias in node.names
-                if not (
-                    alias.name == "cutlass"
-                    or alias.name.startswith("cutlass.")
-                    or alias.name == "cuda"
-                    or alias.name.startswith("cuda.")
-                )
-            ]
-            if aliases:
-                node.names = aliases
-                kept.append(ast.unparse(node))
-        elif isinstance(node, ast.ImportFrom):
-            module = node.module or ""
-            if (
-                module == "cutlass"
-                or module.startswith("cutlass.")
-                or module == "cuda"
-                or module.startswith("cuda.")
-            ):
-                continue
-            kept.append(ast.unparse(node))
-        else:
-            kept.append(ast.unparse(node))
-    return "\n".join(kept) + ("\n" if kept else "")
+    return drop_imports(import_header, ("cutlass", "cuda"))
 
 
-class CuTeAOTOperatorTransform(ast.NodeTransformer):
+class CuTeAOTOperatorTransform(MarkerCallTransform):
     def __init__(self, kernel: CuTeAOT, global_names: set[str]) -> None:
-        super().__init__()
+        super().__init__(op_name=kernel.name, global_names=global_names)
         self._kernel: CuTeAOT = kernel
-        self._global_names: set[str] = global_names
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
-        # Strip @torch.jit.unused: the rewritten body becomes a runnable torch.ops call.
-        strip_jit_unused_decorator(node, self._calls_cutedsl_kernel)
-        self.generic_visit(node)
-        return node
-
-    def _calls_cutedsl_kernel(self, node: ast.FunctionDef) -> bool:
-        # Scan only this function's own scope. Skip nested function/lambda/class
-        # bodies so an outer wrapper is not flagged (and its @torch.jit.unused
-        # stripped) for a call that lives only in a nested scope -- that nested
-        # def is handled on its own visit.
-        stack: list[ast.AST] = list(node.body)
-        while stack:
-            child = stack.pop()
-            if (
-                isinstance(child, ast.Call)
-                and isinstance(child.func, ast.Name)
-                and child.func.id in self._global_names
-            ):
-                return True
-            if isinstance(
-                child,
-                (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef),
-            ):
-                continue
-            stack.extend(ast.iter_child_nodes(child))
-        return False
-
-    def visit_Call(self, node: ast.Call) -> ast.expr:
-        self.generic_visit(node)
-        if isinstance(node.func, ast.Name) and node.func.id in self._global_names:
-            new_func = ast.Attribute(
-                value=ast.Attribute(
-                    value=ast.Attribute(
-                        value=ast.Name(id="torch", ctx=ast.Load()),
-                        attr="ops",
-                        ctx=ast.Load(),
-                    ),
-                    attr=DEFAULT_OP_NAMESPACE_PREFIX,
-                    ctx=ast.Load(),
-                ),
-                attr=self._kernel.name,
-                ctx=ast.Load(),
-            )
-            return ast.Call(func=new_func, args=node.args, keywords=node.keywords)
-        return node
-
-    def contains_cutedsl_call(self, node: ast.AST) -> bool:
-        # Module-wide on purpose: called with the whole tree to decide whether to
-        # emit SO-loading, so it must see calls in any (incl. nested) scope.
-        for child in ast.walk(node):
-            if (
-                isinstance(child, ast.Call)
-                and isinstance(child.func, ast.Name)
-                and child.func.id in self._global_names
-            ):
-                return True
-        return False
-
-    def generate_so_loading_code(
-        self,
-        node: ast.AST,
-        abs_triton_aot_path: str,
-    ) -> str:
-        if not self.contains_cutedsl_call(node):
-            return ""
-
-        kernel_dir = get_cutedsl_aot_dir_name(self._kernel)
-        so_path = os.path.join(
-            abs_triton_aot_path,
-            kernel_dir,
-            f"{self._kernel.name.lstrip('_')}.so",
-        )
-
-        return f"""
-# Auto-generated by triton_aot.kernel_wrapper_codegen
-import torch
-torch.ops.load_library("{so_path}")
-"""
+    def kernel_dir(self) -> str:
+        return get_cutedsl_aot_dir_name(self._kernel)
