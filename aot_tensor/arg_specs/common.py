@@ -97,6 +97,11 @@ def tensor_hash_key(arg: Any) -> dict[str, Any]:
         )
     # Layouts are marked dynamic, so one .so serves any shape. Key on the layout
     # pattern, not sizes, or N shapes would become N specializations.
+    # TODO: specialize on alignment and divisibility, like Triton's
+    # tt.divisibility: record the best level each sample meets (capped by the
+    # arg spec) instead of aligned16, compile each variant with it, and match it
+    # in spec_selector.match_condition, stricter variants first. CuTeDSL first
+    # needs the TODO in compile/cutedsl/pipeline.py.
     return {
         "dtype": str(arg.dtype),
         "dim": int(arg.dim()),

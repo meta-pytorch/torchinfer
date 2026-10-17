@@ -190,9 +190,10 @@ def compile_cutedsl_to_cpp(
 
     if torch.version.hip is not None:
         raise NotImplementedError("CuTeDSL AOT is only supported on NVIDIA CUDA.")
-    # TODO: support multiple specializations per op (the Triton AOT path already
-    # does). Needs a selector in the generated torch op that dispatches on the
-    # runtime arg hash_key to the matching cubin/sidecar, like codegen.gen_selector.
+    # TODO: support multiple specializations per op with compile/spec_selector.py:
+    # export_to_c each variant with prefix=Variant.symbol, emit one sidecar entry
+    # per variant, and dispatch with render_selector. Then share the torch-op arg
+    # codegen (scalar/constexpr tables, schema, C++ params) with FlyDSL.
     if len(specs) != 1:
         raise NotImplementedError(
             f"CuTeDSL AOT currently supports one specialization per op, got {len(specs)} for {op.name}."
