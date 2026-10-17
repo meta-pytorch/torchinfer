@@ -2,6 +2,11 @@
 
 # pyre-strict
 
+"""CPU-only tests for the FlyDSL AOT extension builder. Inputs are the
+snapshotted compile artifacts under ``resources/``; setuptools is mocked.
+"""
+
+import glob
 import os
 import tempfile
 import unittest
@@ -16,7 +21,10 @@ from aot_tensor.build.flydsl.extension_builder import (
 )
 from parameterized import parameterized
 
-_KERNEL = "_flydsl_vec_launch"
+_KERNEL = "_flydsl__silu_gate_launch"
+_FIXTURE_DIR: str = os.path.join(
+    os.path.dirname(__file__), "resources", f"flydsl_toy_flydsl_{_KERNEL}"
+)
 
 
 def _touch(path: str) -> str:
@@ -31,25 +39,25 @@ class FlydslExtensionBuilderTest(unittest.TestCase):
         os.makedirs(os.path.join(self.toolkit, "include", "hip"))
         _touch(os.path.join(self.toolkit, "include", "hip", "hip_runtime.h"))
         os.makedirs(os.path.join(self.toolkit, "lib"))
-        self.kernel_dir: str = self.enterContext(tempfile.TemporaryDirectory())
-        _touch(os.path.join(self.kernel_dir, f"{_KERNEL}_torch_op.cpp"))
-        self.objects: list[str] = [
-            _touch(os.path.join(self.kernel_dir, f"{_KERNEL}__{tag}.o"))
-            for tag in ("aaaa", "bbbb")
-        ]
+        self.output_dir: str = self.enterContext(tempfile.TemporaryDirectory())
+        # One object per SUBTRACT variant.
+        self.objects: list[str] = sorted(
+            glob.glob(os.path.join(_FIXTURE_DIR, f"{_KERNEL}__*.o"))
+        )
+        self.assertEqual(len(self.objects), 2, _FIXTURE_DIR)
 
     def _builder(self, objects: list[str] | None = None) -> FlydslExtensionBuilder:
         return FlydslExtensionBuilder(
-            self.kernel_dir,
+            _FIXTURE_DIR,
             _KERNEL,
-            self.kernel_dir,
+            self.output_dir,
             self.objects if objects is None else objects,
             build_config=ExtensionBuildConfig(gpu_toolkit_path=self.toolkit),
         )
 
     def test_links_objects_into_a_self_contained_so_exporting_nothing(self) -> None:
         def fake_setup(**_kwargs: object) -> None:
-            _touch(os.path.join(self.kernel_dir, "flydsl_vec_launch.so"))
+            _touch(os.path.join(self.output_dir, "flydsl__silu_gate_launch.so"))
 
         with (
             mock.patch.object(
@@ -61,11 +69,13 @@ class FlydslExtensionBuilderTest(unittest.TestCase):
         ):
             result = self._builder().build()
 
-        self.assertEqual(result, os.path.join(self.kernel_dir, "flydsl_vec_launch.so"))
+        self.assertEqual(
+            result, os.path.join(self.output_dir, "flydsl__silu_gate_launch.so")
+        )
         (extension,) = setup.call_args.kwargs["ext_modules"]
         self.assertEqual(
             extension.sources,
-            [os.path.join(self.kernel_dir, f"{_KERNEL}_torch_op.cpp")],
+            [os.path.join(_FIXTURE_DIR, f"{_KERNEL}_torch_op.cpp")],
         )
         self.assertEqual(extension.extra_objects, self.objects)
         (link_arg,) = extension.extra_link_args
@@ -95,5 +105,5 @@ class FlydslExtensionBuilderTest(unittest.TestCase):
         with mock.patch.object(extension_builder, "is_amd", return_value=False):
             with self.assertRaisesRegex(NotImplementedError, "AMD ROCm"):
                 build_flydsl_aot_extension(
-                    self.kernel_dir, _KERNEL, self.kernel_dir, self.objects
+                    _FIXTURE_DIR, _KERNEL, self.output_dir, self.objects
                 )

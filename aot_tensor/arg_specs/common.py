@@ -102,6 +102,9 @@ def tensor_hash_key(arg: Any) -> dict[str, Any]:
     # arg spec) instead of aligned16, compile each variant with it, and match it
     # in spec_selector.match_condition, stricter variants first. CuTeDSL first
     # needs the TODO in compile/cutedsl/pipeline.py.
+    # Unlike Triton, a lower level is not always correct: CuTe-style kernels
+    # hard-code copy widths (e.g. a 128-bit BufferCopy), so the fallback must
+    # be opt-in. FlyDSL's JIT cache already keys on alignment and divisibility.
     return {
         "dtype": str(arg.dtype),
         "dim": int(arg.dim()),
