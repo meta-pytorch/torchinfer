@@ -44,6 +44,7 @@ import textwrap
 from typing import Any
 
 import torch
+from aot_tensor.arg_specs.common import RawSpec, resolve_runtime_args
 from aot_tensor.compile.cutedsl.codegen import (
     _codegens,
     _entry_args,
@@ -57,7 +58,6 @@ from aot_tensor.compile.cutedsl.codegen import (
 )
 from aot_tensor.compile.template_utils import CUTEDSL_TEMPLATES
 from aot_tensor.constants import DEFAULT_OP_NAMESPACE_PREFIX
-from aot_tensor.cute_specs import CuTeRawSpec, resolve_runtime_args
 from aot_tensor.types import CuTeAOT
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -179,7 +179,7 @@ def generate_torch_op_content(
 
 def compile_cutedsl_to_cpp(
     op: CuTeAOT,
-    specs: list[CuTeRawSpec],
+    specs: list[RawSpec],
     install_dir: str,
     prefix: str,
 ) -> None:

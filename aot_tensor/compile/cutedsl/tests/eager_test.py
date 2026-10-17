@@ -5,13 +5,13 @@
 import unittest
 
 import torch
-from aot_tensor.compile.cutedsl.eager import _compile_cache_key
-from aot_tensor.cute_specs import (
-    CuTeArgSpec,
-    CuTeConstexprArg,
-    CuTeTensorArg,
+from aot_tensor.arg_specs.common import (
+    ConstexprArg,
     resolve_runtime_args,
+    sample_spec_and_hash,
 )
+from aot_tensor.arg_specs.cute import CuTeArgSpec, CuTeTensorArg
+from aot_tensor.compile.cutedsl.eager import _compile_cache_key
 
 
 def _toy_kernel() -> None:
@@ -19,38 +19,10 @@ def _toy_kernel() -> None:
 
 
 class CompileCacheKeyTest(unittest.TestCase):
-    """Cache-key-level checks for the eager compile cache. Tensor-key details
-    (shape-independence, dtype, layout) are covered by
-    ``cute_specs_test.TensorHashKeyTest``; here we cover the cache-key aggregation
-    -- rank, constexpr, and alignment."""
-
-    SPECS: list[CuTeArgSpec] = [CuTeTensorArg("x"), CuTeConstexprArg("flag", bool)]
-
-    def _key(self, x: torch.Tensor, flag: bool) -> str:
-        values = resolve_runtime_args(self.SPECS, "op", x, flag)
-        return _compile_cache_key(_toy_kernel, self.SPECS, "op", values)
-
-    def test_rank_distinguishes(self) -> None:
-        self.assertNotEqual(
-            self._key(torch.empty(4, 8), True),
-            self._key(torch.empty(4, 8, 2), True),
-        )
-
-    def test_constexpr_distinguishes(self) -> None:
-        self.assertNotEqual(
-            self._key(torch.empty(4, 8), True),
-            self._key(torch.empty(4, 8), False),
-        )
-
-    def test_alignment_distinguishes(self) -> None:
-        # Drop one float32 (4 bytes) off the base so data_ptr is no longer
-        # 16-byte aligned; same dtype/rank but a different alignment bit.
-        unaligned = torch.empty(17)[1:]
-        self.assertNotEqual(unaligned.data_ptr() % 16, 0)
-        self.assertNotEqual(
-            self._key(torch.empty(16), True), self._key(unaligned, True)
-        )
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_equals_aot_spec_hash(self) -> None:
+        # A cached eager kernel must match what the lowered .so specializes to.
+        specs: list[CuTeArgSpec] = [CuTeTensorArg("x"), ConstexprArg("flag", bool)]
+        x = torch.empty(4, 8)
+        values = resolve_runtime_args(specs, "op", x, True)
+        _, aot_hash = sample_spec_and_hash(specs, "op", "eager_test", x, True)
+        self.assertEqual(_compile_cache_key(_toy_kernel, specs, "op", values), aot_hash)

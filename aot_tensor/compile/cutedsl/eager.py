@@ -10,14 +10,15 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from aot_tensor.compile.cutedsl.adapter import get_cutedsl_eager_cache
-from aot_tensor.compile.cutedsl.codegen import build_cute_call_args
-from aot_tensor.cute_specs import (
-    CuTeArgSpec,
+from aot_tensor.arg_specs.common import (
     module_basename_for_callable,
     resolve_runtime_args,
-    spec_hash_from_values,
+    spec_hash_key,
 )
+from aot_tensor.arg_specs.cute import CuTeArgSpec
+from aot_tensor.compile.adapter_base import hash_spec
+from aot_tensor.compile.cutedsl.adapter import get_cutedsl_eager_cache
+from aot_tensor.compile.cutedsl.codegen import build_cute_call_args
 
 
 def _compile_cache_key(
@@ -29,8 +30,8 @@ def _compile_cache_key(
     """Eager cache key == the AOT specialization hash for this call, from
     already-resolved ``values`` so a cached eager kernel matches what the lowered
     ``.so`` specializes to."""
-    return spec_hash_from_values(
-        arg_specs, op_name, module_basename_for_callable(jit_fn), values
+    return hash_spec(
+        spec_hash_key(arg_specs, op_name, module_basename_for_callable(jit_fn), values)
     )
 
 

@@ -11,8 +11,9 @@ import torch
 
 # @manual=//triton:triton
 import triton
+from aot_tensor.arg_specs.common import module_basename_for_callable
+from aot_tensor.arg_specs.cute import CuTeArgSpec
 from aot_tensor.compile.triton.utils import is_autotuner
-from aot_tensor.cute_specs import CuTeArgSpec, module_basename_for_callable
 from triton.runtime.jit import KernelInterface
 
 

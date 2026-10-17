@@ -7,6 +7,8 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import torch
+from aot_tensor.arg_specs.common import ScalarArg
+from aot_tensor.arg_specs.cute import CuTeTensorArg
 from aot_tensor.compile.compile_state import (
     get_aott_compile_state,
     get_kernel_specs,
@@ -17,7 +19,6 @@ from aot_tensor.compile.cutedsl.adapter import (
     collect,
     CuTeAdapter,
 )
-from aot_tensor.cute_specs import CuTeScalarArg, CuTeTensorArg
 from aot_tensor.types import CuTeAOT, cutedsl_aot
 
 
@@ -39,7 +40,7 @@ class CuTeDSLSpecCollectionTest(unittest.TestCase):
 
         return cutedsl_aot(
             jit_fn=vector_add_kernel,
-            arg_specs=[CuTeTensorArg("x"), CuTeScalarArg("n", "i32")],
+            arg_specs=[CuTeTensorArg("x"), ScalarArg("n", "i32")],
         )
 
     def test_collect_dedups_and_adds_new_specs(self) -> None:
@@ -94,7 +95,7 @@ class CuTeFindKernelStrictnessTest(unittest.TestCase):
         kernel.__name__ = name
         op = cutedsl_aot(
             jit_fn=kernel,
-            arg_specs=[CuTeTensorArg("x"), CuTeScalarArg("n", "i32")],
+            arg_specs=[CuTeTensorArg("x"), ScalarArg("n", "i32")],
         )
         _collect_cutedsl_spec(op, torch.randn(8), 4)
         return op

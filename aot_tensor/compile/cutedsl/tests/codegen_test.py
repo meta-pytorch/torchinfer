@@ -17,6 +17,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from aot_tensor.arg_specs.common import ConstexprArg, ScalarArg
+from aot_tensor.arg_specs.cute import CuTeTensorArg
 from aot_tensor.compile.cutedsl import pipeline as cutedsl_mod
 from aot_tensor.compile.cutedsl.codegen import (
     _entry_args,
@@ -38,7 +40,6 @@ from aot_tensor.compile.cutedsl.pipeline import (
     generate_torch_op_content,
 )
 from aot_tensor.constants import DEFAULT_OP_NAMESPACE_PREFIX
-from aot_tensor.cute_specs import CuTeConstexprArg, CuTeScalarArg, CuTeTensorArg
 from parameterized import parameterized
 
 _PREFIX = "pfx"
@@ -91,7 +92,7 @@ class EntryAbiConsistencyTest(unittest.TestCase):
 
     def test_contiguous_tensor_omits_strides(self) -> None:
         args = _entry_args(
-            [make_codegen(CuTeTensorArg("x")), make_codegen(CuTeScalarArg("n", "i32"))],
+            [make_codegen(CuTeTensorArg("x")), make_codegen(ScalarArg("n", "i32"))],
             {"x": (2, 0)},
         )
         self.assertEqual(
@@ -126,7 +127,7 @@ class EntryAbiConsistencyTest(unittest.TestCase):
         ]
     )
     def test_scalar_entry_param_per_dtype(self, dtype: str, entry: str) -> None:
-        args = _entry_args([make_codegen(CuTeScalarArg("v", dtype))], {})
+        args = _entry_args([make_codegen(ScalarArg("v", dtype))], {})
         self.assertEqual(args[0].decl, f"{entry} v")
         self.assertEqual(args[0].ctype, entry)
 
@@ -168,10 +169,8 @@ class EntryStructBuildsTest(unittest.TestCase):
 class MakeCodegenTest(unittest.TestCase):
     def test_dispatch_per_kind(self) -> None:
         self.assertIsInstance(make_codegen(CuTeTensorArg("x")), TensorCodegen)
-        self.assertIsInstance(make_codegen(CuTeScalarArg("n", "i32")), ScalarCodegen)
-        self.assertIsInstance(
-            make_codegen(CuTeConstexprArg("c", int)), ConstexprCodegen
-        )
+        self.assertIsInstance(make_codegen(ScalarArg("n", "i32")), ScalarCodegen)
+        self.assertIsInstance(make_codegen(ConstexprArg("c", int)), ConstexprCodegen)
 
     def test_unsupported_spec_raises(self) -> None:
         with self.assertRaises(RuntimeError):
@@ -187,7 +186,7 @@ class TorchParamTest(unittest.TestCase):
         self.assertEqual(cg.torch_schema_param(1), "Tensor(b!) x")
 
     def test_scalar_cpp_widens_but_schema_stays_int(self) -> None:
-        cg = make_codegen(CuTeScalarArg("n", "i32"))
+        cg = make_codegen(ScalarArg("n", "i32"))
         self.assertEqual(cg.torch_cpp_param(), "int64_t n")
         self.assertEqual(cg.torch_schema_param(0), "int n")
 
@@ -201,12 +200,12 @@ class TorchParamTest(unittest.TestCase):
     def test_constexpr_cpp_and_schema(
         self, _name: str, py_type: type, cpp: str, schema: str
     ) -> None:
-        cg = make_codegen(CuTeConstexprArg("c", py_type))
+        cg = make_codegen(ConstexprArg("c", py_type))
         self.assertEqual(cg.torch_cpp_param(), f"{cpp} c")
         self.assertEqual(cg.torch_schema_param(0), f"{schema} c")
 
     def test_constexpr_unsupported_type_raises(self) -> None:
-        cg = make_codegen(CuTeConstexprArg("c", str))
+        cg = make_codegen(ConstexprArg("c", str))
         with self.assertRaises(RuntimeError):
             cg.torch_cpp_param()
         with self.assertRaises(RuntimeError):
@@ -225,27 +224,27 @@ class GuardTest(unittest.TestCase):
             cg.guard("op", SimpleNamespace(dtype="torch.complex64"))
 
     def test_scalar_i32_range_guard(self) -> None:
-        cg = make_codegen(CuTeScalarArg("n", "i32"))
+        cg = make_codegen(ScalarArg("n", "i32"))
         self.assertIn("std::numeric_limits<int32_t>", cg.guard("op", 0))
 
     def test_scalar_non_i32_has_no_guard(self) -> None:
-        self.assertEqual(make_codegen(CuTeScalarArg("n", "i64")).guard("op", 0), "")
+        self.assertEqual(make_codegen(ScalarArg("n", "i64")).guard("op", 0), "")
 
     def test_constexpr_value_guard(self) -> None:
-        out = make_codegen(CuTeConstexprArg("flag", bool)).guard("op", True)
+        out = make_codegen(ConstexprArg("flag", bool)).guard("op", True)
         self.assertIn("flag != true", out)
 
 
 class ConstexprCodegenTest(unittest.TestCase):
     def test_not_runtime_contributes_nothing_to_entry(self) -> None:
-        cg = make_codegen(CuTeConstexprArg("flag", bool))
+        cg = make_codegen(ConstexprArg("flag", bool))
         self.assertFalse(cg.is_runtime)
         self.assertEqual(cg.entry_args({}), [])
         self.assertIsNone(cg.wrapper_arg())
 
     def test_cute_arg_passthrough(self) -> None:
-        self.assertIs(make_codegen(CuTeConstexprArg("flag", bool)).cute_arg(True), True)
-        self.assertEqual(make_codegen(CuTeConstexprArg("n", int)).cute_arg(7), 7)
+        self.assertIs(make_codegen(ConstexprArg("flag", bool)).cute_arg(True), True)
+        self.assertEqual(make_codegen(ConstexprArg("n", int)).cute_arg(7), 7)
 
 
 class ValidateTest(unittest.TestCase):
@@ -255,7 +254,7 @@ class ValidateTest(unittest.TestCase):
             validate_cutedsl_op(
                 [
                     make_codegen(CuTeTensorArg("x")),
-                    make_codegen(CuTeScalarArg("n", "i32")),
+                    make_codegen(ScalarArg("n", "i32")),
                 ],
                 "op",
                 _PREFIX,
@@ -264,9 +263,7 @@ class ValidateTest(unittest.TestCase):
 
     def test_bad_scalar_dtype_raises(self) -> None:
         with self.assertRaises(RuntimeError):
-            validate_cutedsl_op(
-                [make_codegen(CuTeScalarArg("n", "f16"))], "op", _PREFIX
-            )
+            validate_cutedsl_op([make_codegen(ScalarArg("n", "f16"))], "op", _PREFIX)
 
     def test_bad_identifier_raises(self) -> None:
         with self.assertRaises(RuntimeError):
@@ -309,7 +306,7 @@ class GenerateContentTest(unittest.TestCase):
     def test_sidecar_entry_content(self) -> None:
         codegens = [
             make_codegen(CuTeTensorArg("x")),
-            make_codegen(CuTeScalarArg("n", "i32")),
+            make_codegen(ScalarArg("n", "i32")),
         ]
         out = generate_sidecar_entry_content("op", codegens, "pfx", {"x": (2, 0)})
         self.assertIn("int32_t pfx_entry(", out)
@@ -326,7 +323,7 @@ class GenerateContentTest(unittest.TestCase):
     def test_torch_op_content(self) -> None:
         codegens = [
             make_codegen(CuTeTensorArg("x")),
-            make_codegen(CuTeScalarArg("n", "i32")),
+            make_codegen(ScalarArg("n", "i32")),
         ]
         values = {"x": SimpleNamespace(dtype="torch.float32"), "n": 0}
         out = generate_torch_op_content(
@@ -353,7 +350,7 @@ class GenerateContentTest(unittest.TestCase):
     def test_torch_op_content_with_constexpr(self) -> None:
         codegens = [
             make_codegen(CuTeTensorArg("x")),
-            make_codegen(CuTeConstexprArg("flag", bool)),
+            make_codegen(ConstexprArg("flag", bool)),
         ]
         values = {"x": SimpleNamespace(dtype="torch.float32"), "flag": True}
         out = generate_torch_op_content(
@@ -410,7 +407,7 @@ class CompileCuTeDSLToCppTest(unittest.TestCase):
 
         op = SimpleNamespace(
             name="_cutedsl_vector_add",
-            arg_specs=[CuTeTensorArg("x"), CuTeScalarArg("n", "i32")],
+            arg_specs=[CuTeTensorArg("x"), ScalarArg("n", "i32")],
             jit_fn=lambda *a: None,
         )
         spec = SimpleNamespace(runtime_args=("X", 4), runtime_kwargs={})

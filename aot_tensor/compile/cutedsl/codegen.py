@@ -15,13 +15,9 @@ from dataclasses import dataclass
 from typing import Any, Callable, Generic, TypeVar
 
 import torch
+from aot_tensor.arg_specs.common import ConstexprArg, ScalarArg
+from aot_tensor.arg_specs.cute import CuTeArgSpec, CuTeTensorArg
 from aot_tensor.compile.stable_types import TORCH_DTYPE_TO_STABLE
-from aot_tensor.cute_specs import (
-    CuTeArgSpec,
-    CuTeConstexprArg,
-    CuTeScalarArg,
-    CuTeTensorArg,
-)
 
 _C_IDENTIFIER: re.Pattern[str] = re.compile(r"^[A-Za-z_]\w*$")
 
@@ -306,7 +302,7 @@ class TensorCodegen(ArgCodegen[CuTeTensorArg]):
         return tensor
 
 
-class ScalarCodegen(ArgCodegen[CuTeScalarArg]):
+class ScalarCodegen(ArgCodegen[ScalarArg]):
     @property
     def _info(self) -> ScalarDtype:
         return _SCALAR_DTYPES[self.spec.dtype]
@@ -350,7 +346,7 @@ class ScalarCodegen(ArgCodegen[CuTeScalarArg]):
             )
 
 
-class ConstexprCodegen(ArgCodegen[CuTeConstexprArg]):
+class ConstexprCodegen(ArgCodegen[ConstexprArg]):
     is_runtime = False
 
     def _cpp_type(self) -> str:
@@ -395,9 +391,9 @@ def make_codegen(spec: CuTeArgSpec) -> ArgCodegen[Any]:
     """The single point that branches on CuTe arg kind."""
     if isinstance(spec, CuTeTensorArg):
         return TensorCodegen(spec)
-    if isinstance(spec, CuTeScalarArg):
+    if isinstance(spec, ScalarArg):
         return ScalarCodegen(spec)
-    if isinstance(spec, CuTeConstexprArg):
+    if isinstance(spec, ConstexprArg):
         return ConstexprCodegen(spec)
     raise RuntimeError(f"CuTeAOT: unsupported arg spec {spec!r}.")
 

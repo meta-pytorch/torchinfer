@@ -7,6 +7,7 @@ import logging
 import os
 from typing import Any
 
+from aot_tensor.arg_specs.common import sample_spec_and_hash
 from aot_tensor.build.cutedsl.extension_builder import build_cutedsl_aot_extension
 from aot_tensor.compile.adapter_base import AOTTAdapter, CompileContext, DslSpecStore
 from aot_tensor.compile.compile_state import (
@@ -17,7 +18,6 @@ from aot_tensor.compile.compile_state import (
 )
 from aot_tensor.compile.cutedsl.pipeline import compile_cutedsl_to_cpp
 from aot_tensor.constants import CUTEDSL
-from aot_tensor.cute_specs import sample_spec_and_hash
 from aot_tensor.transform.import_utils import drop_imports
 from aot_tensor.transform.marker_call_transform import MarkerCallTransform
 from aot_tensor.transform.wrapper_codegen_utils import (

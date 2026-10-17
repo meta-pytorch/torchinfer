@@ -7,11 +7,15 @@ import unittest
 from typing import Any
 from unittest.mock import call, MagicMock, patch
 
+from aot_tensor.arg_specs.common import ScalarArg
+from aot_tensor.arg_specs.cute import CuTeTensorArg
 from aot_tensor.compile.aott_compile import enable_spec_collection
 from aot_tensor.compile.compile_state import get_aott_compile_state
 from aot_tensor.compile.cutedsl import eager as cutedsl_eager
+
+# Patched in test_call_runs_jit.
+# @dep=//aot_tensor/compile/cutedsl:adapter
 from aot_tensor.compile.tests.mocks import MockAutotuner
-from aot_tensor.cute_specs import CuTeScalarArg, CuTeTensorArg
 from aot_tensor.types import (
     _default_cutedsl_op_name,
     AnnotationHint,
@@ -275,9 +279,7 @@ class CuTeAOTTest(_MarkerResetTest):
         def vector_add_kernel() -> None:
             pass
 
-        op = cutedsl_aot(
-            jit_fn=vector_add_kernel, arg_specs=[CuTeScalarArg("n", "i32")]
-        )
+        op = cutedsl_aot(jit_fn=vector_add_kernel, arg_specs=[ScalarArg("n", "i32")])
         if enabled:
             enable_spec_collection()
         # __call__ imports cutlass.cute and injects cute.compile into the runner;

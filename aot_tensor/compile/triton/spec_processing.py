@@ -85,7 +85,7 @@ MAX_POINTER_RANGE_32_VARIANTS: int = 4
 
 # A raw kernel spec produced by infer_spec: "signature" (always) and,
 # optionally, "pointer_range_32" (arg indices; consumed for AMD targets only).
-# TODO(changpan): move to structured per-arg types like ``aot_tensor/cute_specs.py``
+# TODO(changpan): move to structured per-arg types like ``aot_tensor/arg_specs/cute.py``
 # (``TritonPointerArg(dtype, aligned_16, pointer_range_32, optional)``,
 # ``TritonScalarArg``, ...), with ``RawKernelSpec = tuple[TritonArg, ...]``, so
 # per-arg observations live in the signature; the scalar-divisibility TODO in

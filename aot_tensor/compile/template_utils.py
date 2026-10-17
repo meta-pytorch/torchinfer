@@ -116,6 +116,7 @@ class TemplateSet:
 TRITON_TEMPLATES: TemplateSet = TemplateSet(
     package="aot_tensor.compile.triton.templates", tag="TRITON_AOT"
 )
+# @dep=//aot_tensor/compile/cutedsl/templates:cutedsl_templates
 CUTEDSL_TEMPLATES: TemplateSet = TemplateSet(
     package="aot_tensor.compile.cutedsl.templates", tag="CUTEDSL_AOT"
 )
