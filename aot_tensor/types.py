@@ -13,6 +13,7 @@ import torch
 import triton
 from aot_tensor.arg_specs.common import module_basename_for_callable
 from aot_tensor.arg_specs.cute import CuTeArgSpec
+from aot_tensor.arg_specs.fly import FlyArgSpec
 from aot_tensor.compile.triton.utils import is_autotuner
 from triton.runtime.jit import KernelInterface
 
@@ -195,6 +196,39 @@ class CuTeAOT(AOTTMarker, metaclass=AOTTMarkerMeta):
         )
 
 
+class FlyAOT(AOTTMarker, metaclass=AOTTMarkerMeta):
+    """Wraps a ``@flyc.jit`` launcher for AOT collection and wrapper rewriting.
+
+    ``arg_specs`` lists every launcher parameter except the ``fx.Stream`` one,
+    which is always filled with the current stream (eager and AOT alike).
+    """
+
+    def __init__(self, jit_fn: Any, arg_specs: list[FlyArgSpec]) -> None:
+        # A @flyc.jit JitFunction keeps the user function on ``.func``.
+        fn: Any = jit_fn.func
+        self.name: str = f"_flydsl_{fn.__name__}"
+        self.jit_fn: Any = jit_fn
+        self.arg_specs: list[FlyArgSpec] = arg_specs
+        self.module_basename: str = module_basename_for_callable(fn)
+
+        if not self.name.replace("_", "").isalnum():
+            raise RuntimeError(
+                f"FlyAOT: derived invalid op name {self.name!r} from launcher."
+            )
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        collector = type(self).spec_collector
+        if collector is not None:
+            collector(self, *args, **kwargs)
+
+        # Lazy: flydsl is AMD-only and must stay off the Triton import path.
+        from aot_tensor.compile.flydsl import (  # @manual  # pyrefly: ignore[missing-import]
+            eager as flydsl_eager,
+        )
+
+        return flydsl_eager.run_flydsl_jit(self, *args, **kwargs)
+
+
 # All concrete kernel marker classes -- the single source of truth for the set
 # of markers the compile layer registers collectors on / clears (see
 # ``compile.compile_state`` and the compile session ``aott_compile``).
@@ -217,6 +251,10 @@ def cutedsl_aot(
     return CuTeAOT(jit_fn=jit_fn, arg_specs=arg_specs)
 
 
+def flydsl_aot(jit_fn: Any, arg_specs: list[FlyArgSpec]) -> FlyAOT:
+    return FlyAOT(jit_fn=jit_fn, arg_specs=arg_specs)
+
+
 def get_all_triton_aot_instances() -> List[TritonAOT]:
     """Return all triton aot function instances (e.g. decorated with @triton_aot)."""
     return TritonAOT.get_instances()
@@ -229,6 +267,10 @@ def get_all_cutedsl_aot_instances() -> List[CuTeAOT]:
 
 def get_cutedsl_aot_dir_name(op: CuTeAOT) -> str:
     return f"cutedsl_{op.module_basename}_{op.name}"
+
+
+def get_flydsl_aot_dir_name(op: FlyAOT) -> str:
+    return f"flydsl_{op.module_basename}_{op.name}"
 
 
 def reset_all_triton_aot_autotune_cache() -> bool:

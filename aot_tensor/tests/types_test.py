@@ -4,11 +4,13 @@
 
 import sys
 import unittest
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import call, MagicMock, patch
 
 from aot_tensor.arg_specs.common import ScalarArg
 from aot_tensor.arg_specs.cute import CuTeTensorArg
+from aot_tensor.arg_specs.fly import FlyTensorArg
 from aot_tensor.compile.aott_compile import enable_spec_collection
 from aot_tensor.compile.compile_state import get_aott_compile_state
 from aot_tensor.compile.cutedsl import eager as cutedsl_eager
@@ -21,7 +23,10 @@ from aot_tensor.types import (
     AnnotationHint,
     CuTeAOT,
     cutedsl_aot,
+    FlyAOT,
+    flydsl_aot,
     get_all_triton_aot_instances,
+    get_flydsl_aot_dir_name,
     reset_all_triton_aot_autotune_cache,
     TritonAOT,
 )
@@ -36,11 +41,13 @@ class _MarkerResetTest(unittest.TestCase):
     def setUp(self) -> None:
         TritonAOT._instances.clear()
         CuTeAOT._instances.clear()
+        FlyAOT._instances.clear()
         get_aott_compile_state().reset()
 
     def tearDown(self) -> None:
         TritonAOT._instances.clear()
         CuTeAOT._instances.clear()
+        FlyAOT._instances.clear()
         get_aott_compile_state().reset()
 
 
@@ -303,3 +310,17 @@ class CuTeAOTTest(_MarkerResetTest):
         # collection fires once (with the op + args) only when AOT compile is enabled
         expected_calls = [call(op, 5)] if enabled else []
         self.assertEqual(collect.call_args_list, expected_calls)
+
+
+class FlyAOTTest(_MarkerResetTest):
+    def test_name_and_dir_come_from_the_wrapped_function(self) -> None:
+        def vec_launch() -> None:
+            pass
+
+        op = flydsl_aot(SimpleNamespace(func=vec_launch), [FlyTensorArg("x")])
+        self.assertEqual(op.name, "_flydsl_vec_launch")
+        self.assertEqual(op.module_basename, "types_test")
+        self.assertEqual(
+            get_flydsl_aot_dir_name(op), "flydsl_types_test__flydsl_vec_launch"
+        )
+        self.assertIs(op, FlyAOT.get_instances()[-1])
