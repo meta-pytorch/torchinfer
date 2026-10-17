@@ -232,7 +232,7 @@ class FlyAOT(AOTTMarker, metaclass=AOTTMarkerMeta):
 # All concrete kernel marker classes -- the single source of truth for the set
 # of markers the compile layer registers collectors on / clears (see
 # ``compile.compile_state`` and the compile session ``aott_compile``).
-ALL_MARKERS: tuple[type[AOTTMarker], ...] = (TritonAOT, CuTeAOT)
+ALL_MARKERS: tuple[type[AOTTMarker], ...] = (TritonAOT, CuTeAOT, FlyAOT)
 
 
 def triton_aot(

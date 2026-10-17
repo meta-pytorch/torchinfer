@@ -3,6 +3,7 @@
 
 TRITON: str = "triton"
 CUTEDSL: str = "cutedsl"
+FLYDSL: str = "flydsl"
 
 # Filename of the per-kernel torch-op schema JSON.
 AOTT_OP_SCHEMAS_FILE_NAME: str = "aott_op_schemas.json"

@@ -2,10 +2,10 @@
 
 """DSL-agnostic helpers shared by the per-DSL wrapper-codegen logic.
 
-Used by both ``compile/triton/adapter.py`` and ``compile/cutedsl/adapter.py``:
-the globals kernel scan (``find_sole_marker_in_globals``), the file-writing
-skeleton (``generate_wrapper_files_skeleton``), torch.package source extraction,
-and the @torch.jit.unused strip. They live here -- not in the driver
+Used by the Triton, CuTeDSL and FlyDSL adapters: the globals kernel scan
+(``find_sole_marker_in_globals``), the file-writing skeleton
+(``generate_wrapper_files_skeleton``), torch.package source extraction, and the
+@torch.jit.unused strip. They live here -- not in the driver
 (``kernel_wrapper_codegen.py``) -- so each DSL imports them without depending on
 the driver, keeping the driver's only edge to the DSLs a runtime one
 (``dsl_state``).

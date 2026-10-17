@@ -26,7 +26,7 @@ from aot_tensor.transform.transform_kernels import (
     get_weight_signature,
     transform_kernels,
 )
-from aot_tensor.types import CuTeAOT
+from aot_tensor.types import AOTTMarker, CuTeAOT, FlyAOT
 from torch.fx import GraphModule
 from triton.backends.compiler import GPUTarget  # @manual=//triton:triton
 
@@ -80,14 +80,14 @@ def _prepare_work_dir(work_dir: os.PathLike[str] | str) -> Path:
     return path
 
 
-def _reject_cutedsl(
-    _marker: CuTeAOT,
+def _reject_non_triton(
+    marker: AOTTMarker,
     *_args: Any,
     **_kwargs: Any,
 ) -> None:
     raise RuntimeError(
         "lower_model() v0 supports Triton kernels only; "
-        "CuTeDSL support is not yet part of the public API"
+        f"{type(marker).__name__} support is not yet part of the public API"
     )
 
 
@@ -152,7 +152,10 @@ def lower_model(
         dsl_config=lowering_options.dsl_configs,
         extension_build_config=lowering_options.extension_build_config,
         compile_path=str(resolved_work_dir),
-        spec_collector_overrides={CuTeAOT: _reject_cutedsl},
+        spec_collector_overrides={
+            CuTeAOT: _reject_non_triton,
+            FlyAOT: _reject_non_triton,
+        },
     )
     with session:
         _run_forward_passes(module, example_inputs)

@@ -1,7 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
 """Wrapper transform for DSLs whose launch site is a bare call to a marker
-global (CuTeDSL), unlike Triton's ``kernel[grid](...)``."""
+global (CuTeDSL, FlyDSL), unlike Triton's ``kernel[grid](...)``."""
 
 import ast
 import os

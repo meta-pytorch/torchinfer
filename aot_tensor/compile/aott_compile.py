@@ -12,7 +12,14 @@ from aot_tensor.compile.compile_state import (
     get_aott_compile_path,
     get_aott_compile_state,
 )
-from aot_tensor.types import ALL_MARKERS, AOTTMarker, CuTeAOT, SpecCollector, TritonAOT
+from aot_tensor.types import (
+    ALL_MARKERS,
+    AOTTMarker,
+    CuTeAOT,
+    FlyAOT,
+    SpecCollector,
+    TritonAOT,
+)
 from torch import package
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -44,10 +51,21 @@ def _cutedsl_spec_collector(marker: CuTeAOT, *args: Any, **kwargs: Any) -> None:
     collect(marker, *args, **kwargs)
 
 
+def _flydsl_spec_collector(marker: FlyAOT, *args: Any, **kwargs: Any) -> None:
+    """Forward a FlyDSL marker call to the FlyDSL plugin's ``collect`` (lazy:
+    the flydsl wheel is AMD-only and must stay off Triton-only paths)."""
+    from aot_tensor.compile.flydsl.adapter import (  # @manual  # pyrefly: ignore[missing-import]
+        collect,
+    )
+
+    collect(marker, *args, **kwargs)
+
+
 # Marker type -> its spec collector. The one place to edit when adding a DSL.
 _SPEC_COLLECTORS: dict[type[AOTTMarker], SpecCollector] = {
     TritonAOT: _triton_spec_collector,
     CuTeAOT: _cutedsl_spec_collector,
+    FlyAOT: _flydsl_spec_collector,
 }
 
 # Keep in lockstep with ALL_MARKERS: a marker missing here would silently get no
