@@ -218,6 +218,8 @@ class TensorCodegen(ArgCodegen[CuTeTensorArg]):
         return f"torch::stable::Tensor {self.name}"
 
     def torch_schema_param(self, index: int) -> str:
+        # TODO: take Tensor? like Triton and FlyDSL, as the generated-cpp-stable-abi
+        # rule requires for TorchScript; needs an NVIDIA host to validate.
         alias = chr(ord("a") + index)
         return f"Tensor({alias}!) {self.name}"
 

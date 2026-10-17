@@ -120,3 +120,7 @@ TRITON_TEMPLATES: TemplateSet = TemplateSet(
 CUTEDSL_TEMPLATES: TemplateSet = TemplateSet(
     package="aot_tensor.compile.cutedsl.templates", tag="CUTEDSL_AOT"
 )
+# @dep=//aot_tensor/compile/flydsl/templates:flydsl_templates
+FLYDSL_TEMPLATES: TemplateSet = TemplateSet(
+    package="aot_tensor.compile.flydsl.templates", tag="FLYDSL_AOT"
+)
