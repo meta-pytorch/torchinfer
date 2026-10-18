@@ -16,7 +16,9 @@ from aot_tensor.compile.compile_state import (
     get_aott_compile_state,
     is_aott_compile_enabled,
 )
-from aot_tensor.types import AOTTMarker, CuTeAOT, TritonAOT
+from aot_tensor.constants import FLYDSL
+from aot_tensor.types import AOTTMarker, CuTeAOT, FlyAOT, TritonAOT
+from parameterized import parameterized
 
 
 class SpecCollectionTest(unittest.TestCase):
@@ -67,6 +69,22 @@ class SpecCollectionTest(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             enable_spec_collection({NotAMarker: custom_collector})
+
+    def test_dsls_leaves_unselected_markers_without_a_collector(self) -> None:
+        def custom_collector(marker: Any, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        # The override targets an unselected DSL, so it is dropped too.
+        enable_spec_collection({TritonAOT: custom_collector}, dsls={FLYDSL})
+
+        self.assertIsNotNone(FlyAOT.spec_collector)
+        self.assertIsNone(TritonAOT.spec_collector)
+        self.assertIsNone(CuTeAOT.spec_collector)
+
+    @parameterized.expand([("unknown", {"tritonn"}), ("empty", set())])
+    def test_dsls_rejects_a_bad_selection(self, _name: str, dsls: set[str]) -> None:
+        with self.assertRaisesRegex(ValueError, "non-empty subset"):
+            enable_spec_collection(dsls=dsls)
 
 
 class _RecordingAdapter(AOTTAdapter[Any]):
@@ -142,6 +160,12 @@ class CompileSessionTest(unittest.TestCase):
         # __exit__ cleared the overridden collector along with the defaults.
         self.assertIsNone(TritonAOT.spec_collector)
         self.assertFalse(is_aott_compile_enabled())
+
+    def test_session_forwards_dsls(self) -> None:
+        # A one-shot iterator still works when __enter__ reads it again.
+        with AOTTCompileSession(dsls=iter([FLYDSL])):
+            self.assertIsNotNone(FlyAOT.spec_collector)
+            self.assertIsNone(TritonAOT.spec_collector)
 
     def test_session_forwards_extension_build_config(self) -> None:
         adapter = _RecordingAdapter()

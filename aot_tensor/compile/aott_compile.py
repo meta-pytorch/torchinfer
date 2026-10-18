@@ -2,7 +2,7 @@
 
 import importlib
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from types import ModuleType, TracebackType
 from typing import Any, Callable, Optional, Type
 
@@ -12,6 +12,7 @@ from aot_tensor.compile.compile_state import (
     get_aott_compile_path,
     get_aott_compile_state,
 )
+from aot_tensor.constants import ALL_DSLS, check_dsls, CUTEDSL, FLYDSL, TRITON
 from aot_tensor.types import (
     ALL_MARKERS,
     AOTTMarker,
@@ -75,9 +76,20 @@ assert set(_SPEC_COLLECTORS) == set(ALL_MARKERS), (
     f"{set(_SPEC_COLLECTORS) ^ set(ALL_MARKERS)}"
 )
 
+# DSL name -> marker, for ``dsls``.
+DSL_MARKERS: dict[str, type[AOTTMarker]] = {
+    TRITON: TritonAOT,
+    CUTEDSL: CuTeAOT,
+    FLYDSL: FlyAOT,
+}
+assert DSL_MARKERS.keys() == ALL_DSLS and set(DSL_MARKERS.values()) == set(
+    ALL_MARKERS
+), "DSL_MARKERS out of sync with ALL_DSLS / ALL_MARKERS"
+
 
 def enable_spec_collection(
     overrides: Optional[Mapping[type[AOTTMarker], SpecCollector]] = None,
+    dsls: Iterable[str] = ALL_DSLS,
 ) -> None:
     """Start AOT spec collection: register each marker's collector so marker calls
     forward to the owning DSL's ``collect``. No upfront registry needed.
@@ -86,14 +98,18 @@ def enable_spec_collection(
     (e.g. one that routes compile to a custom adapter). Keys must be known
     markers: ``disable_spec_collection`` iterates ``ALL_MARKERS``, so an
     unknown marker's collector would never be cleared.
+
+    Only ``dsls`` collect (default: all). Other markers get no collector, even
+    if ``overrides`` names them, so they just run JIT.
     """
     if overrides:
         unknown = set(overrides) - set(ALL_MARKERS)
         if unknown:
             raise ValueError(f"spec-collector overrides for unknown markers: {unknown}")
+    selected = {DSL_MARKERS[dsl] for dsl in check_dsls(dsls)}
     merged = {**_SPEC_COLLECTORS, **(overrides or {})}
     for marker, collector in merged.items():
-        marker.set_spec_collector(collector)
+        marker.set_spec_collector(collector if marker in selected else None)
 
 
 def disable_spec_collection() -> None:
@@ -121,6 +137,7 @@ class AOTTCompileSession:
       the legacy lazily-created temporary directory behavior.
     - spec_collector_overrides: optional marker -> collector remap forwarded to
       ``enable_spec_collection`` (route a marker's compile to a custom adapter).
+    - dsls: DSL names to lower (e.g. ``{"flydsl"}``); default: all.
     """
 
     def __init__(
@@ -132,7 +149,10 @@ class AOTTCompileSession:
             Mapping[type[AOTTMarker], SpecCollector]
         ] = None,
         compile_path: Optional[str] = None,
+        dsls: Iterable[str] = ALL_DSLS,
     ) -> None:
+        # Validate now; a frozenset is safe to re-read in __enter__.
+        self._dsls: frozenset[str] = check_dsls(dsls)
         self._import_module: Callable[[str], ModuleType] = (
             package_importer.import_module
             if package_importer is not None
@@ -152,7 +172,7 @@ class AOTTCompileSession:
         state.reset()
         if self._compile_path is not None:
             state.compile_path = self._compile_path
-        enable_spec_collection(self._spec_collector_overrides)
+        enable_spec_collection(self._spec_collector_overrides, self._dsls)
         logger.info(f"Start AOTT compile, output dir: {get_aott_compile_path()}")
 
     def __exit__(

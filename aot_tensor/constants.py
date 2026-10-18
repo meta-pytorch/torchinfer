@@ -1,9 +1,25 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
 
+from collections.abc import Iterable
+
 TRITON: str = "triton"
 CUTEDSL: str = "cutedsl"
 FLYDSL: str = "flydsl"
+ALL_DSLS: frozenset[str] = frozenset({TRITON, CUTEDSL, FLYDSL})
+
+
+def check_dsls(dsls: Iterable[str]) -> frozenset[str]:
+    """``dsls`` as a frozenset; raises unless it is a non-empty subset of
+    ``ALL_DSLS``."""
+    selected = frozenset(dsls)
+    if not selected or not selected <= ALL_DSLS:
+        raise ValueError(
+            f"dsls must be a non-empty subset of {sorted(ALL_DSLS)}, "
+            f"got {sorted(selected)}"
+        )
+    return selected
+
 
 # Filename of the per-kernel torch-op schema JSON.
 AOTT_OP_SCHEMAS_FILE_NAME: str = "aott_op_schemas.json"
