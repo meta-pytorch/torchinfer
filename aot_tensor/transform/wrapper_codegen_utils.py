@@ -1,4 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
+# pyre-strict
 
 """DSL-agnostic helpers shared by the per-DSL wrapper-codegen logic.
 
@@ -246,7 +247,9 @@ def generate_wrapper_files_skeleton(
 
     # Rewrite interned torch.package imports (e.g. hammer.*) before appending the
     # auto-generated .so-loading preamble, so stdlib imports there are untouched.
-    if package_importer is not None:
+    if package_importer is not None and _is_torch_package_module(
+        node_target.__module__
+    ):
         import_header = rewrite_package_imports(import_header, package_importer)
     if import_filter is not None:
         import_header = import_filter(import_header)

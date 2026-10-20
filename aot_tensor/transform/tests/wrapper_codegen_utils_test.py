@@ -1,4 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
+# pyre-strict
 
 
 """Unit tests for the DSL-agnostic wrapper-codegen helpers in
@@ -8,7 +9,13 @@
 """
 
 import ast
+import importlib.util
+import io
+import sys
+import tempfile
 import unittest
+from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 from aot_tensor.transform.import_utils import get_original_import_header
@@ -16,7 +23,54 @@ from aot_tensor.transform.wrapper_codegen_utils import (
     _extract_function_source,
     _get_module_and_source,
     find_sole_marker_in_globals,
+    generate_wrapper_files_skeleton,
 )
+from torch.package import PackageExporter, PackageImporter
+
+
+class _IdentityTransform(ast.NodeTransformer):
+    def generate_so_loading_code(self, node: ast.AST, abs_triton_aot_path: str) -> str:
+        return ""
+
+
+class WrapperSourceOriginTest(unittest.TestCase):
+    def test_archived_and_live_wrappers_keep_distinct_helpers(self) -> None:
+        helper_name = "aot_tensor.ops.codegen_origin_helper"
+        target_name = "aot_tensor.ops.codegen_origin_target"
+        source = f"from {helper_name} import OFFSET\n\ndef wrapper(x):\n    return x + OFFSET\n"
+        archive = io.BytesIO()
+        with PackageExporter(archive) as exporter:
+            exporter.save_source_string("aot_tensor", "", is_package=True)
+            exporter.save_source_string("aot_tensor.ops", "", is_package=True)
+            exporter.save_source_string(helper_name, "OFFSET = 7\n")
+            exporter.save_source_string(target_name, source)
+        archive.seek(0)
+        importer = PackageImporter(archive)
+        archived = importer.import_module(target_name).wrapper
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(sys.modules):
+            root = Path(temporary)
+            for name, code in ((helper_name, "OFFSET = 11\n"), (target_name, source)):
+                path = root / (name.rsplit(".", 1)[-1] + ".py")
+                path.write_text(code)
+                spec = importlib.util.spec_from_file_location(name, path)
+                assert spec is not None and spec.loader is not None
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[name] = module
+                spec.loader.exec_module(module)
+            live = sys.modules[target_name].wrapper
+            for name, target, expected in (
+                ("archived", archived, 8),
+                ("live", live, 12),
+            ):
+                with self.subTest(origin=name):
+                    self.assertEqual(target(1), expected)
+                    generate_wrapper_files_skeleton(
+                        target, name, _IdentityTransform(), temporary, importer
+                    )
+                    namespace: dict[str, Any] = {"_package_importer": importer}
+                    path = root / name / "wrapper_wrapper.py"
+                    exec(compile(path.read_text(), str(path), "exec"), namespace)
+                    self.assertEqual(namespace["wrapper"](1), expected)
 
 
 class TestGetOriginalImportHeader(unittest.TestCase):
