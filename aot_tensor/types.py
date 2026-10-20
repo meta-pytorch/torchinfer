@@ -148,14 +148,12 @@ class TritonAOT(
             k: _normalize_annotation(v) for k, v in annotations.items()
         }
 
-    # pyrefly: ignore [bad-override]
     def run(self, *args: Any, **kwargs: Any) -> Any:
         # Read via the class: a function stored as a class attr would otherwise
         # bind ``self`` twice on instance access.
         collector = type(self).spec_collector
         if collector is not None:
             collector(self, *args, **kwargs)
-        # pyre-ignore[29]: KernelInterface.run is callable at runtime
         return self.fn.run(*args, **kwargs)
 
 
