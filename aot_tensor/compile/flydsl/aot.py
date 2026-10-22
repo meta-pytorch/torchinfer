@@ -174,7 +174,7 @@ def _compile(
 
     with private_attr(jit_function, "_create_mlir_context")():
         _, jit_args, _, _ = jit_argument.convert_to_jit_arguments(sig, bound)
-    return state["ir_text"], state["entry"], _launcher_abi(sig, bound, jit_args)
+    return artifact.ir, state["entry"], _launcher_abi(sig, bound, jit_args)
 
 
 def export_launcher(

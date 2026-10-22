@@ -12,7 +12,7 @@ from typing import Any
 
 import flydsl
 
-_VALIDATED_FLYDSL = "0.3.2"
+_VALIDATED_FLYDSL = "0.4.0"
 
 
 def private_attr(owner: Any, name: str) -> Any:
