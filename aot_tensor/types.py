@@ -6,7 +6,19 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Callable, ClassVar, Dict, List, Literal, Optional, Union
+from types import MappingProxyType
+from typing import (
+    Any,
+    Callable,
+    cast,
+    ClassVar,
+    Dict,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Union,
+)
 
 import torch
 
@@ -15,12 +27,40 @@ import triton
 from aot_tensor.arg_specs.common import module_basename_for_callable
 from aot_tensor.arg_specs.cute import CuTeArgSpec
 from aot_tensor.arg_specs.fly import FlyArgSpec, FlyTensorArg
-from aot_tensor.compile.triton.utils import is_autotuner
+from aot_tensor.compile.triton.utils import is_autotuner, is_heuristics
+from triton.compiler import make_backend
+from triton.runtime.autotuner import Autotuner, Heuristics
+from triton.runtime.driver import driver
 from triton.runtime.jit import KernelInterface
 
 
 _VALID_HINTS: frozenset[int] = frozenset({1, 8, 16})
 _VALID_POINTER_HINTS: frozenset[int] = frozenset({16})
+
+# The Triton backend options a TritonAOT kernel may set: numerics options that
+# the JIT launch and the AOT compile apply the same way. AOT-T sets the launch
+# geometry per spec and the target per compile, and the JIT derives other
+# options from some of the rest (``debug`` turns on ``sanitize_overflow``),
+# which the AOT compile does not.
+_SUPPORTED_COMPILE_OPTIONS: frozenset[str] = frozenset(
+    {"enable_fp_fusion", "enable_reflect_ftz"}
+)
+
+
+def _keywords_the_kernel_binds(fn: Any) -> set[str]:
+    """Launch keywords the kernel binds itself: its parameters, and the keys
+    its autotune Configs and heuristics pass to the JIT."""
+    bound: set[str] = set()
+    while isinstance(fn, KernelInterface):
+        bound.update(getattr(fn, "arg_names", ()))
+        if is_autotuner(fn):
+            bound.update(
+                k for cfg in cast(Autotuner, fn).configs for k in cfg.all_kwargs()
+            )
+        elif is_heuristics(fn):
+            bound.update(cast(Heuristics, fn).values)
+        fn = getattr(fn, "fn", None)
+    return bound
 
 
 @dataclass(frozen=True)
@@ -137,24 +177,101 @@ class TritonAOT(
     - Tensor:  typically inferred from runtime ``torch.Tensor.dtype``.
     - Optional tensor:  auto-detected when the same kernel is called
       with a tensor at one site and ``None`` at another.
+
+    ``compile_options`` are Triton backend options for this kernel:
+    ``enable_fp_fusion`` and ``enable_reflect_ftz``. The JIT launch and the AOT
+    compile both get them, so the cubin computes what the JIT run did. Each
+    backend gets only the options it defines, so one kernel can carry options
+    for several. A launch may repeat a declared option but not change it (the
+    wrapper rewrite accepts a repeat only as a literal), and the kernel may not
+    bind the same name itself, as a parameter or through a ``triton.Config`` or
+    ``triton.heuristics``. Every marker that launches one kernel must declare
+    the same options; spec collection, ``compile_and_build`` and wrapper
+    generation check this. The first launch with options under a Triton driver
+    class looks up that backend's options, which dynamo cannot trace.
     """
 
     def __init__(
         self,
         fn: KernelInterface[Callable[..., Any]],
         annotations: Dict[str, AnnotationInput],
+        compile_options: Optional[Mapping[str, Any]] = None,
     ) -> None:
         self.fn: KernelInterface[Callable[..., Any]] = fn
         self.annotations: Dict[str, Annotation] = {
             k: _normalize_annotation(v) for k, v in annotations.items()
         }
+        # A dict: ``run`` branches on it, and dynamo takes an empty
+        # MappingProxyType for true.
+        self._compile_options: Dict[str, Any] = dict(compile_options or {})
+        if self._compile_options:
+            unsupported = sorted(
+                self._compile_options.keys() - _SUPPORTED_COMPILE_OPTIONS
+            )
+            if unsupported:
+                raise RuntimeError(
+                    f"TritonAOT: compile_options cannot set {unsupported}; only "
+                    f"{sorted(_SUPPORTED_COMPILE_OPTIONS)} reach the JIT launch "
+                    f"and the AOT compile the same way."
+                )
+            bound = sorted(
+                self._compile_options.keys() & _keywords_the_kernel_binds(fn)
+            )
+            if bound:
+                raise RuntimeError(
+                    f"TritonAOT: compile_options cannot set {bound}, which the "
+                    f"kernel binds itself as a parameter, a triton.Config key or "
+                    f"a triton.heuristics key."
+                )
+        # Keyed by the active Triton driver's class, which fixes the backend.
+        self._launch_options: Dict[type, Dict[str, Any]] = {}
+
+    @property
+    def compile_options(self) -> Mapping[str, Any]:
+        return MappingProxyType(self._compile_options)
+
+    def _active_backend_options(self) -> Dict[str, Any]:
+        # The JIT raises on an option its backend does not define, while
+        # ``triton.compiler.compile`` drops it, so only launches filter.
+        active = driver.active
+        options = self._launch_options.get(type(active))
+        if options is None:
+            backend = make_backend(active.get_current_target())
+            known = backend.parse_options({}).__dict__
+            options = {k: v for k, v in self._compile_options.items() if k in known}
+            self._launch_options[type(active)] = options
+        return options
+
+    def _without_declared_options(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        # The AOT compile sees only the declaration, so a launch may repeat a
+        # declared option but not change it. The repeat is dropped: the
+        # collector binds every launch keyword to a kernel parameter.
+        repeated = self._compile_options.keys() & kwargs.keys()
+        if not repeated:
+            return kwargs
+        changed = sorted(k for k in repeated if kwargs[k] != self._compile_options[k])
+        if changed:
+            raise RuntimeError(
+                "TritonAOT: the launch sets "
+                + ", ".join(f"{k}={kwargs[k]!r}" for k in changed)
+                + " but compile_options declare "
+                + ", ".join(f"{k}={self._compile_options[k]!r}" for k in changed)
+                + ", which the AOT compile uses."
+            )
+        return {k: v for k, v in kwargs.items() if k not in repeated}
 
     def run(self, *args: Any, **kwargs: Any) -> Any:
+        if self._compile_options:
+            kwargs = self._without_declared_options(kwargs)
         # Read via the class: a function stored as a class attr would otherwise
         # bind ``self`` twice on instance access.
         collector = type(self).spec_collector
         if collector is not None:
             collector(self, *args, **kwargs)
+        if self._compile_options:
+            # After the collector, which binds every launch keyword to a kernel
+            # parameter.
+            kwargs = {**self._active_backend_options(), **kwargs}
         return self.fn.run(*args, **kwargs)
 
 
@@ -254,9 +371,10 @@ ALL_MARKERS: tuple[type[AOTTMarker], ...] = (TritonAOT, CuTeAOT, FlyAOT)
 
 def triton_aot(
     annotations: Dict[str, AnnotationInput],
+    compile_options: Optional[Mapping[str, Any]] = None,
 ) -> Callable[[KernelInterface[Callable[..., Any]]], TritonAOT]:
     def decorator(fn: KernelInterface[Callable[..., Any]]) -> TritonAOT:
-        return TritonAOT(fn, annotations)
+        return TritonAOT(fn, annotations, compile_options)
 
     return decorator
 

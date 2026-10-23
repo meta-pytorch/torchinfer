@@ -3,9 +3,11 @@
 # pyre-ignore-all-errors[2]: triton func without type
 
 import importlib
+import os
 import tempfile
 import unittest
-from typing import List
+from typing import Any, List
+from unittest.mock import patch
 
 # @manual=//triton:triton
 import triton
@@ -16,8 +18,9 @@ from aot_tensor.compile.triton.arg_descriptor import (
     PointerArg,
     ScalarArg,
 )
-from aot_tensor.compile.triton.pipeline import compile_specs_parallel
+from aot_tensor.compile.triton.pipeline import compile_specs_parallel, spec_gen
 from aot_tensor.compile.triton.spec_processing import AutotuneAttrs, KernelSpec
+from parameterized import parameterized
 from triton.backends.compiler import GPUTarget
 
 
@@ -144,3 +147,68 @@ class CompileSpecsParallelTest(unittest.TestCase):
                 self.assertIn("load_", spec_code)
                 self.assertIn("CUfunction", spec_code)
                 self.assertEqual(shared, 0)
+
+
+@triton.jit
+def _mul_add(x_ptr, y_ptr, N, BLOCK: tl.constexpr) -> None:
+    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < N
+    tl.store(y_ptr + offs, tl.load(x_ptr + offs, mask=mask) * 1.5 + 1.0, mask=mask)
+
+
+class SpecGenCompileOptionsTest(unittest.TestCase):
+    """A real compile: the cubin honours the compile options, and the legacy
+    launcher launches the threads the cubin requires."""
+
+    @parameterized.expand(
+        [("plain", None, True), ("unfused", {"enable_fp_fusion": False}, False)]
+    )
+    def test_cubin_follows_the_compile_options(
+        self, _name: str, compile_options: dict[str, bool] | None, fused: bool
+    ) -> None:
+        spec = KernelSpec(
+            signature={0: "*fp32", 1: "*fp32", 2: "i32"},
+            constants={3: 1024},
+            divisible_by_16={0, 1},
+            divisible_by_8=set(),
+            autotune=AutotuneAttrs(num_warps=8),
+        )
+        descriptors: list[ArgDescriptor] = [
+            PointerArg(name="x_ptr", index=0, is_optional=False),
+            PointerArg(name="y_ptr", index=1, is_optional=False),
+            ScalarArg(name="N", index=2, triton_dtype="i32"),
+            ConstantArg(name="BLOCK", index=3, python_type=int),
+        ]
+        compiled = []
+        compile_ = triton.compiler.compile
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            compiled.append(compile_(*args, **kwargs))
+            return compiled[-1]
+
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.dict(os.environ, {"TRITON_AOT_FORCE_LEGACY_LAUNCHER": "1"}),
+            patch(
+                "aot_tensor.compile.triton.pipeline.triton.compiler.compile",
+                side_effect=spy,
+            ),
+        ):
+            code, _ = spec_gen(
+                install_dir=tmpdir,
+                spec=spec,
+                module="aot_tensor.compile.tests.pipeline_gpu_test",
+                name="_mul_add",
+                gpu_target=GPUTarget(backend="cuda", arch=80, warp_size=32),
+                import_module=importlib.import_module,
+                descriptors=descriptors,
+                compile_options=compile_options,
+            )
+
+        (kernel,) = compiled
+        ptx = kernel.asm["ptx"]
+        # enable_fp_fusion=False keeps the multiply and the add apart.
+        self.assertEqual("fma.rn.f32" in ptx, fused)
+        self.assertEqual("mul.rn.f32" in ptx, not fused)
+        self.assertIn(".reqntid 256", ptx)
+        self.assertIn("grid.z, 32 * 8, 1, 1,", code)

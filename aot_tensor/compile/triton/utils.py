@@ -45,6 +45,13 @@ def is_autotuner(obj: Any) -> bool:
     )
 
 
+def is_heuristics(obj: Any) -> bool:
+    """Whether *obj* is a ``Heuristics`` (any module-path alias of it)."""
+    return _is_class_alias(
+        obj, qualname="Heuristics", module_suffix="triton.runtime.autotuner"
+    )
+
+
 def unwrap_to_jit(fn: Any) -> JITFunction[Callable[..., Any]]:
     """Peel ``KernelInterface`` layers (Heuristics / Autotuner / ...) until
     landing on the underlying ``JITFunction``. Raises if not reachable."""

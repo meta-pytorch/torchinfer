@@ -14,6 +14,7 @@ import multiprocessing as mp
 import os
 import signal
 import threading
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from types import FrameType, ModuleType
 from typing import Any, Callable
@@ -60,6 +61,7 @@ def compile_specs_parallel(
     gpu_target: GPUTarget,
     import_module: Callable[[str], ModuleType],
     descriptors: list[ArgDescriptor],
+    compile_options: Mapping[str, Any] | None = None,
 ) -> list[tuple[str, int]]:
     """Compile kernel specs in parallel; return per-spec ``(code, shared)``.
 
@@ -78,6 +80,7 @@ def compile_specs_parallel(
                 gpu_target,
                 import_module,
                 descriptors,
+                compile_options,
             )
             for spec in specs
         ]
@@ -93,6 +96,7 @@ def compile_specs_parallel(
                     gpu_target,
                     import_module,
                     descriptors,
+                    compile_options,
                 ),
                 specs,
             )
@@ -111,6 +115,7 @@ def spec_gen(
     gpu_target: GPUTarget,
     import_module: Callable[[str], ModuleType],
     descriptors: list[ArgDescriptor],
+    compile_options: Mapping[str, Any] | None = None,
 ) -> tuple[str, int]:
     """Compile one spec; return ``(cubin+loader+launcher, metadata.shared)``.
 
@@ -125,6 +130,10 @@ def spec_gen(
 
     compile_arg = gen_compile_arg(spec, func)
     options = {f.name: getattr(spec.autotune, f.name) for f in autotune_fields}
+    # The kernel's TritonAOT compile options, which its JIT launches used too.
+    # TritonAOT allows none of the autotune fields, and the backend drops the
+    # options it does not define.
+    options.update(compile_options or {})
     compile_kwargs = {
         "target": gpu_target,
         "options": options,
@@ -185,6 +194,7 @@ def compile_to_cpp(
     default_values: dict[str, Any] | None = None,
     tuner_fallback: bool = False,
     op_namespace: str,
+    compile_options: Mapping[str, Any] | None = None,
 ) -> None:
     """Compile a Triton kernel into .cpp, .h, _torch_op.cpp, _meta.py files.
 
@@ -201,6 +211,9 @@ def compile_to_cpp(
         import_module: torch.package importer for loading kernels source code.
         default_values: Default values for kernel arguments.
         tuner_fallback: If True, generate fallback tuner code.
+        compile_options: Triton backend options for every spec's compile: the
+            ``compile_options`` of the ``TritonAOT`` marker that launched the
+            kernel during spec collection.
     """
     tuned_func = func if is_autotuner(func) else None
     # pyre-ignore[6]: Attributes verified by is_autotuner
@@ -265,6 +278,7 @@ def compile_to_cpp(
         gpu_target,
         import_module,
         descriptors,
+        compile_options,
     )
     unit, filtered_specs = unit.drop_oversize_specs(generated_specs)
 

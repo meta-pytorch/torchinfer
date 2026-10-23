@@ -11,7 +11,7 @@ import os
 import pickle
 from dataclasses import dataclass
 from inspect import getcallargs, Parameter, signature
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 
@@ -496,14 +496,34 @@ class TritonAdapter(AOTTAdapter[TritonAOT]):
 
         logger.info(f"[AOTT]: compiling {len(kernel_specs)} kernels")
 
+        # Keys that build into one dir: markers stacked on one JIT function,
+        # or kernels whose modules end in the same name.
+        fn_dirs: Dict[Any, str] = {}
+        dir_kernels: Dict[str, Tuple[Any, Dict[str, Any]]] = {}
+        for fn, kspec in kernel_specs.items():
+            jit_fn = unwrap_to_jit(fn)
+            module_suffix = jit_fn.__module__.rsplit(".", 1)[-1]
+            fn_dir = f"{ctx.compile_path}/{module_suffix}_{jit_fn.__name__}"
+            fn_dirs[fn] = fn_dir
+            other, options = dir_kernels.setdefault(
+                fn_dir, (jit_fn, kspec.compile_options)
+            )
+            if options != kspec.compile_options:
+                raise RuntimeError(
+                    f"TritonAOT: {other.__module__}.{other.__name__} with "
+                    f"compile_options {options!r} and {jit_fn.__module__}."
+                    f"{jit_fn.__name__} with {kspec.compile_options!r} would build "
+                    f"into one directory, {fn_dir}. Markers that launch one kernel "
+                    f"must declare the same options."
+                )
+
         for fn, kspec in kernel_specs.items():
             jit_fn = unwrap_to_jit(fn)
             fn_name = jit_fn.__name__
 
             logger.info(f"[AOTT]: compiling {fn_name} with specs: {kspec.specs}")
 
-            module_suffix = jit_fn.__module__.rsplit(".", 1)[-1]
-            fn_dir = f"{ctx.compile_path}/{module_suffix}_{fn_name}"
+            fn_dir = fn_dirs[fn]
             os.makedirs(fn_dir, exist_ok=True)
 
             _resolve_autotune_cache(fn, fn_name, fn_dir, auto_tune_overrides)
@@ -520,6 +540,7 @@ class TritonAdapter(AOTTAdapter[TritonAOT]):
                 op_namespace=self._op_namespace,
                 import_module=ctx.import_module,
                 default_values=default_values,
+                compile_options=kspec.compile_options,
             )
 
             shared_library = build_triton_aot_extension(
@@ -567,6 +588,17 @@ class TritonAdapter(AOTTAdapter[TritonAOT]):
         ``generate_wrapper_files_skeleton``.
         """
         jit_fn = unwrap_to_jit(match)
+        kspec = get_kernel_specs(self.name).get(match.fn)
+        declared = dict(match.compile_options)
+        if kspec is not None and kspec.compile_options != declared:
+            # The rewritten call runs the cubin, not this marker's JIT launch.
+            raise RuntimeError(
+                f"TritonAOT: {jit_fn.__name__} was compiled with compile_options "
+                f"{kspec.compile_options!r}, but {node_target} launches it "
+                f"through a marker that declares {declared!r}. Every marker that "
+                f"launches it must declare the same options, and a spec collector "
+                f"must record them through aot_tensor.compile.triton.adapter.collect."
+            )
         module_base = _get_clean_module_basename(jit_fn.__module__)
         kernel_dir = f"{module_base}_{get_kernel_name(jit_fn)}"
         generate_wrapper_files_skeleton(
@@ -590,9 +622,27 @@ def collect(
     ``enable_spec_collection`` registers on ``TritonAOT`` (fired from
     ``TritonAOT.run`` while compile is active). Registers ``TritonAdapter`` as active
     (so the orchestrator dispatches compile to it) and records the spec.
+
+    Also records the marker's ``compile_options`` for the kernel's AOT compile,
+    so every marker that launches one kernel must declare the same ones.
     """
     register_active(TritonAdapter)
-    _collect_triton_spec(marker.fn, marker.annotations, *args, **kwargs)
+    options = dict(marker.compile_options)
+    kernel_specs = get_kernel_specs(TritonAdapter.name)
+    collected = kernel_specs.get(marker.fn)
+    if collected is not None and collected.compile_options != options:
+        raise RuntimeError(
+            f"TritonAOT: {marker.fn} is launched through markers that declare "
+            f"compile_options {collected.compile_options!r} and {options!r}, "
+            f"but its AOT compile can use only one."
+        )
+    try:
+        _collect_triton_spec(marker.fn, marker.annotations, *args, **kwargs)
+    finally:
+        # Also when collection raises after storing a spec.
+        collected = kernel_specs.get(marker.fn)
+        if collected is not None:
+            collected.compile_options = options
 
 
 # =====================================================================
@@ -736,7 +786,10 @@ class TritonAOTOperatorTransform(ast.NodeTransformer):
                     ctx=ast.Load(),
                 )
                 new_args = [grid_arg] + call.args
-                new_keywords = call.keywords + [
+                new_keywords = [
+                    kw for kw in call.keywords if not self._repeats_compile_option(kw)
+                ]
+                new_keywords += [
                     ast.keyword(arg=param, value=ast.Name(id=param, ctx=ast.Load()))
                     for param in self._autotune_params
                 ]
@@ -746,6 +799,33 @@ class TritonAOTOperatorTransform(ast.NodeTransformer):
                     keywords=new_keywords,
                 )
         return node
+
+    def _repeats_compile_option(self, keyword: ast.keyword) -> bool:
+        """Whether *keyword* repeats one of the kernel's compile options, which
+        the op has no parameter for. As in ``TritonAOT.run``, a launch that
+        changes one is refused, here also at launch sites spec collection never
+        ran: the cubin has the declared value. Only a literal can be checked."""
+        declared = (
+            self._kernel.compile_options if isinstance(self._kernel, TritonAOT) else {}
+        )
+        name = keyword.arg
+        if name is None or name not in declared:
+            return False
+        value = keyword.value
+        if not isinstance(value, ast.Constant):
+            raise RuntimeError(
+                f"TritonAOT: {self._kernel_name} is launched with "
+                f"{name}={ast.unparse(value)}, which the wrapper rewrite cannot "
+                f"check against the declared {name}={declared[name]!r}; pass the "
+                f"literal or drop the keyword."
+            )
+        if value.value == declared[name]:
+            return True
+        raise RuntimeError(
+            f"TritonAOT: {self._kernel_name} is launched with "
+            f"{name}={ast.unparse(value)} but compile_options declare "
+            f"{name}={declared[name]!r}, which the AOT compile uses."
+        )
 
     def contains_triton_call(self, node: ast.AST) -> bool:
         """

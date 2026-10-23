@@ -48,6 +48,9 @@ class KernelSpecs:
 
     specs: list[Any] = field(default_factory=list)
     hashes: set[str] = field(default_factory=set)
+    # Backend options every spec compiles with, recorded at collection from
+    # the marker that launched the kernel (Triton's ``compile_options``).
+    compile_options: dict[str, Any] = field(default_factory=dict)
 
     def add(self, spec: Any, hashed_spec: str) -> None:
         if hashed_spec not in self.hashes:

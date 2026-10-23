@@ -5,7 +5,7 @@
 import sys
 import unittest
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import call, MagicMock, patch
 
 from aot_tensor.arg_specs.common import ScalarArg
@@ -28,9 +28,24 @@ from aot_tensor.types import (
     get_all_triton_aot_instances,
     get_flydsl_aot_dir_name,
     reset_all_triton_aot_autotune_cache,
+    triton_aot,
     TritonAOT,
 )
 from parameterized import parameterized
+
+
+class _FakeCudaDriver:
+    def get_current_target(self) -> SimpleNamespace:
+        return SimpleNamespace(backend="cuda")
+
+
+class _FakeHipDriver:
+    def get_current_target(self) -> SimpleNamespace:
+        return SimpleNamespace(backend="hip")
+
+
+# One driver class per backend, as in Triton.
+_FAKE_DRIVERS: dict[str, type[Any]] = {"cuda": _FakeCudaDriver, "hip": _FakeHipDriver}
 
 
 class _MarkerResetTest(unittest.TestCase):
@@ -213,10 +228,11 @@ class ResetAllTritonAOTAutotuneCacheTest(_MarkerResetTest):
 
 class TritonAOTCallTest(_MarkerResetTest):
     """TritonAOT.run dispatch: forwards each call to the registered spec
-    collector (and only when one is registered), then always runs the wrapped
-    kernel. Uses a stand-in collector -- the real one is registered by
-    ``enable_spec_collection`` and its lazy-import path is covered e2e for
-    CuTeDSL in ``CuTeAOTTest``."""
+    collector (and only when one is registered), then runs the wrapped kernel,
+    unless the launch changes a declared compile option. Uses a stand-in
+    collector -- the real one is registered by ``enable_spec_collection``; its
+    lazy-import path is covered e2e for CuTeDSL in ``CuTeAOTTest`` and its
+    handling of compile options in adapter_test's ``CompileOptionsLaunchTest``."""
 
     @parameterized.expand([("registered", True), ("cleared", False)])
     def test_run_forwards_to_collector_only_when_registered(
@@ -237,6 +253,140 @@ class TritonAOTCallTest(_MarkerResetTest):
         fn.run.assert_called_once_with(7)
         expected = [call(marker, 7)] if registered else []
         self.assertEqual(collector.call_args_list, expected)
+
+    @parameterized.expand(
+        [
+            (
+                "cuda",
+                {"enable_fp_fusion", "enable_reflect_ftz"},
+                {"enable_fp_fusion": False, "enable_reflect_ftz": False},
+            ),
+            ("hip", {"enable_fp_fusion"}, {"enable_fp_fusion": False}),
+        ]
+    )
+    def test_run_passes_the_compile_options_the_backend_defines(
+        self, _name: str, defined: set[str], expected: dict[str, bool]
+    ) -> None:
+        fn = MagicMock()
+        options = {"enable_fp_fusion": False, "enable_reflect_ftz": False}
+        marker = TritonAOT(fn, {}, compile_options=options)
+        collector = MagicMock()
+        TritonAOT.set_spec_collector(collector)
+        backend = MagicMock()
+        backend.parse_options.return_value.__dict__ = dict.fromkeys(defined)
+
+        with (
+            patch("aot_tensor.types.driver"),
+            patch("aot_tensor.types.make_backend", return_value=backend),
+        ):
+            marker.run(7, grid=(1,))
+            marker.run(8, grid=(1,), enable_fp_fusion=False)
+
+        self.assertEqual(marker.compile_options, options)
+        # Neither the declared options nor a launch that repeats one reach the
+        # collector; the JIT gets each defined option once.
+        self.assertEqual(
+            collector.call_args_list,
+            [call(marker, 7, grid=(1,)), call(marker, 8, grid=(1,))],
+        )
+        self.assertEqual(
+            fn.run.call_args_list,
+            [call(7, grid=(1,), **expected), call(8, grid=(1,), **expected)],
+        )
+        backend.parse_options.assert_called_once()
+
+    @parameterized.expand([("registered", True), ("cleared", False)])
+    def test_run_refuses_a_launch_that_changes_a_compile_option(
+        self, _name: str, registered: bool
+    ) -> None:
+        fn = MagicMock()
+        marker = TritonAOT(fn, {}, compile_options={"enable_fp_fusion": False})
+        collector = MagicMock()
+        if registered:
+            TritonAOT.set_spec_collector(collector)
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"launch sets enable_fp_fusion=True but compile_options declare "
+            r"enable_fp_fusion=False",
+        ):
+            marker.run(7, grid=(1,), enable_fp_fusion=True)
+
+        # The JIT run would round differently from the AOT cubin, so it never
+        # starts, collecting or not.
+        collector.assert_not_called()
+        fn.run.assert_not_called()
+
+    def test_backend_options_follow_the_active_driver(self) -> None:
+        fn = MagicMock()
+        marker = TritonAOT(
+            fn,
+            {},
+            compile_options={"enable_fp_fusion": False, "enable_reflect_ftz": False},
+        )
+        defined = {
+            "cuda": {"enable_fp_fusion", "enable_reflect_ftz"},
+            "hip": {"enable_fp_fusion"},
+        }
+
+        def make_backend(target: Any) -> MagicMock:
+            backend = MagicMock()
+            backend.parse_options.return_value.__dict__ = dict.fromkeys(
+                defined[target.backend]
+            )
+            return backend
+
+        with (
+            patch("aot_tensor.types.driver") as config,
+            patch("aot_tensor.types.make_backend", side_effect=make_backend) as make,
+        ):
+            for name in ("cuda", "hip", "cuda", "hip"):
+                # A new driver on every switch, as set_active_to_gpu() makes.
+                config.active = _FAKE_DRIVERS[name]()
+                marker.run(7)
+
+        cuda = {"enable_fp_fusion": False, "enable_reflect_ftz": False}
+        hip = {"enable_fp_fusion": False}
+        self.assertEqual(
+            fn.run.call_args_list,
+            [call(7, **cuda), call(7, **hip), call(7, **cuda), call(7, **hip)],
+        )
+        # One backend per driver class, however many drivers and launches.
+        self.assertEqual(make.call_count, 2)
+
+    @parameterized.expand(
+        [
+            ("num_warps", {"num_warps": 8}),
+            ("arch", {"arch": "sm80"}),
+            ("warp_size", {"warp_size": 64}),
+            ("launch_cooperative_grid", {"launch_cooperative_grid": True}),
+            ("launch_pdl", {"launch_pdl": True}),
+            ("instrumentation_mode", {"instrumentation_mode": "gsan"}),
+            # The JIT derives sanitize_overflow from it; the AOT compile does not.
+            ("debug", {"debug": True}),
+            ("enable_fp_fussion", {"enable_fp_fussion": False}),
+        ]
+    )
+    def test_compile_options_outside_the_supported_ones_are_refused(
+        self, key: str, unsupported: dict[str, Any]
+    ) -> None:
+        options = {"enable_fp_fusion": False, **unsupported}
+        with self.assertRaisesRegex(
+            RuntimeError,
+            rf"cannot set \['{key}'\]; only \['enable_fp_fusion', "
+            r"'enable_reflect_ftz'\]",
+        ):
+            triton_aot({}, compile_options=options)(MagicMock())
+        self.assertEqual(TritonAOT.get_instances(), [])
+
+    def test_compile_options_are_read_only(self) -> None:
+        options = {"enable_fp_fusion": False}
+        marker = TritonAOT(MagicMock(), {}, compile_options=options)
+        options["enable_fp_fusion"] = True
+
+        with self.assertRaises(TypeError):
+            cast(dict[str, Any], marker.compile_options)["enable_fp_fusion"] = True
+        self.assertEqual(marker.compile_options, {"enable_fp_fusion": False})
 
 
 class DefaultCuTeDSLOpNameTest(unittest.TestCase):

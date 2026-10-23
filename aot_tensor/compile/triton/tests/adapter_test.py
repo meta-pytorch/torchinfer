@@ -3,6 +3,7 @@
 # pyre-strict
 
 import ast
+import importlib
 import pickle
 import re
 import tempfile
@@ -13,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import torch
 import triton
 import triton.language as tl
-from aot_tensor.compile.adapter_base import hash_spec
+from aot_tensor.compile.adapter_base import CompileContext, hash_spec
 from aot_tensor.compile.compile_state import (
     add_spec,
     get_aott_compile_state,
@@ -35,6 +36,7 @@ from aot_tensor.compile.triton.adapter import (
     infer_spec,
     TritonAdapter,
     TritonAOTOperatorTransform,
+    TritonCompileConfig,
 )
 from aot_tensor.compile.triton.spec_processing import AutotuneAttrs
 from aot_tensor.constants import DEFAULT_OP_NAMESPACE_PREFIX
@@ -818,6 +820,18 @@ def _two_block_kernel(
     pass
 
 
+@triton.jit
+def _option_parameter_kernel(x_ptr, enable_fp_fusion: tl.constexpr) -> None:
+    pass
+
+
+@triton.jit
+def _mul_add(x_ptr, y_ptr, N, BLOCK: tl.constexpr) -> None:
+    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < N
+    tl.store(y_ptr + offs, tl.load(x_ptr + offs, mask=mask) * 1.5 + 1.0, mask=mask)
+
+
 def strip_comments(code: str) -> str:
     """Remove Python comments from code for comparison."""
     lines = code.split("\n")
@@ -1032,6 +1046,467 @@ class AutotuneParamsExplicitOnAllBackendOptsTest(unittest.TestCase):
             )
         mock_driver.active.get_current_target.assert_called_once()
         self.assertEqual(transform.gpu_target.backend, "cuda")
+
+
+class CompileOptionsLaunchTest(_ResetStateTest):
+    """``TritonAOT.run`` in front of the real collector, and the wrapper
+    rewrite of the same launch: a launch keyword that repeats a compile option
+    is dropped, one that changes it raises. Collection records the options the
+    AOT compile then uses, whatever the marker's form."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        TritonAOT.set_spec_collector(collect)
+
+    def tearDown(self) -> None:
+        super().tearDown()
+        TritonAOT._instances.clear()
+
+    def _launch(
+        self, marker: TritonAOT, target: GPUTarget, x: torch.Tensor, **kwargs: Any
+    ) -> MagicMock:
+        # Only the JIT launch and the driver are faked: no GPU here.
+        with (
+            patch("aot_tensor.types.driver") as config,
+            patch.object(_two_block_kernel, "run", return_value="OUT") as jit_run,
+        ):
+            config.active.get_current_target.return_value = target
+            out = marker[(1,)](x, x, BLOCK_M=16, BLOCK_N=16, **kwargs)
+        self.assertEqual(out, "OUT")
+        return jit_run
+
+    @parameterized.expand(
+        [
+            (
+                "cuda",
+                GPUTarget("cuda", 90, 32),
+                {"enable_fp_fusion": False},
+                {"enable_fp_fusion": False},
+            ),
+            # HIP defines no enable_reflect_ftz, so its JIT launch drops it.
+            (
+                "hip",
+                GPUTarget("hip", "gfx942", 64),
+                {"enable_fp_fusion": False, "enable_reflect_ftz": False},
+                {"enable_fp_fusion": False},
+            ),
+        ]
+    )
+    def test_repeating_a_compile_option_collects_the_plain_spec(
+        self,
+        _name: str,
+        target: GPUTarget,
+        compile_options: Dict[str, bool],
+        launched: Dict[str, bool],
+    ) -> None:
+        x = torch.randn(4, 4)
+        marker = TritonAOT(_two_block_kernel, {}, compile_options=compile_options)
+        plain_spec = infer_spec(_two_block_kernel, {}, x, x, BLOCK_M=16, BLOCK_N=16)
+
+        repeated = self._launch(marker, target, x, **compile_options)
+        specs = get_kernel_specs(TritonAdapter.name)[_two_block_kernel].specs
+        self.assertEqual(specs, [plain_spec])
+        plain = self._launch(marker, target, x)
+        self.assertEqual(specs, [plain_spec])
+
+        self.assertIs(repeated.call_args.args[0], x)
+        self.assertEqual(
+            repeated.call_args.kwargs,
+            {"grid": (1,), "warmup": False, "BLOCK_M": 16, "BLOCK_N": 16, **launched},
+        )
+        self.assertEqual(plain.call_args.kwargs, repeated.call_args.kwargs)
+        # Recorded whole: the AOT compile drops what its backend does not define.
+        self.assertEqual(
+            get_kernel_specs(TritonAdapter.name)[_two_block_kernel].compile_options,
+            compile_options,
+        )
+
+    @parameterized.expand([("collecting", True), ("jit_only", False)])
+    def test_changing_a_compile_option_raises_before_collection(
+        self, _name: str, collecting: bool
+    ) -> None:
+        if not collecting:
+            TritonAOT.set_spec_collector(None)
+        x = torch.randn(4, 4)
+        marker = TritonAOT(
+            _two_block_kernel, {}, compile_options={"enable_fp_fusion": False}
+        )
+
+        with (
+            patch.object(_two_block_kernel, "run") as jit_run,
+            self.assertRaisesRegex(RuntimeError, "enable_fp_fusion=True"),
+        ):
+            marker[(1,)](x, x, BLOCK_M=16, BLOCK_N=16, enable_fp_fusion=True)
+
+        jit_run.assert_not_called()
+        self.assertNotIn(_two_block_kernel, get_kernel_specs(TritonAdapter.name))
+
+    def _rewrite(self, launch_keyword: str) -> ast.Module:
+        marker = TritonAOT(
+            _two_block_kernel, {}, compile_options={"enable_fp_fusion": False}
+        )
+        transform = TritonAOTOperatorTransform(
+            marker,
+            op_namespace=DEFAULT_OP_NAMESPACE_PREFIX,
+            gpu_target=GPUTarget("cuda", 90, 32),
+        )
+        tree = ast.parse(
+            "def launch(x, y, exact):\n"
+            "    grid = (1,)\n"
+            "    _two_block_kernel[grid](\n"
+            f"        x, y, BLOCK_M=16, BLOCK_N=16, {launch_keyword}\n"
+            "    )\n"
+        )
+        self.assertTrue(transform.contains_triton_call(tree))
+        return transform.visit(tree)
+
+    def test_wrapper_drops_launch_keywords_that_repeat_compile_options(self) -> None:
+        (op_call,) = [
+            node
+            for node in ast.walk(self._rewrite("enable_fp_fusion=False"))
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_two_block_kernel"
+        ]
+        self.assertEqual(
+            [kw.arg for kw in op_call.keywords],
+            ["BLOCK_M", "BLOCK_N"] + [f.name for f in AutotuneAttrs.fields_for("cuda")],
+        )
+
+    @parameterized.expand(
+        [
+            (
+                "other_value",
+                "enable_fp_fusion=True",
+                " but compile_options declare enable_fp_fusion=False",
+            ),
+            # The rewrite cannot know a runtime value, as TritonAOT.run does.
+            (
+                "expression",
+                "enable_fp_fusion=exact",
+                ", which the wrapper rewrite cannot check against the declared "
+                "enable_fp_fusion=False",
+            ),
+        ]
+    )
+    def test_wrapper_refuses_launch_keywords_that_change_compile_options(
+        self, _name: str, launch_keyword: str, reason: str
+    ) -> None:
+        with self.assertRaisesRegex(
+            RuntimeError,
+            rf"_two_block_kernel is launched with {launch_keyword}{reason}",
+        ):
+            self._rewrite(launch_keyword)
+
+    @parameterized.expand(
+        [
+            # Triton passes a Config's keys and a heuristic's value to the JIT
+            # as launch keywords, so the JIT would not run with the declaration.
+            (
+                "config",
+                lambda: triton.autotune(
+                    configs=[
+                        triton.Config(
+                            {"BLOCK_M": 16, "BLOCK_N": 16, "enable_fp_fusion": True}
+                        )
+                    ],
+                    key=[],
+                )(_two_block_kernel),
+            ),
+            (
+                "heuristics",
+                lambda: triton.heuristics({"enable_fp_fusion": lambda _: True})(
+                    _two_block_kernel
+                ),
+            ),
+            (
+                "heuristics_under_autotune",
+                lambda: triton.autotune(
+                    configs=[triton.Config({"BLOCK_M": 16, "BLOCK_N": 16})], key=[]
+                )(
+                    triton.heuristics({"enable_fp_fusion": lambda _: True})(
+                        _two_block_kernel
+                    )
+                ),
+            ),
+            # The JIT binds the launch keyword to the parameter.
+            ("parameter", lambda: _option_parameter_kernel),
+        ]
+    )
+    def test_options_the_kernel_binds_itself_are_refused(
+        self, _name: str, make_kernel: Callable[[], KernelInterface[Any]]
+    ) -> None:
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"cannot set \['enable_fp_fusion'\], which the kernel binds itself",
+        ):
+            TritonAOT(make_kernel(), {}, compile_options={"enable_fp_fusion": False})
+
+    def test_options_the_kernel_does_not_bind_are_accepted(self) -> None:
+        kernel = triton.autotune(
+            configs=[triton.Config({"BLOCK_M": 16}, maxnreg=64)], key=[]
+        )(triton.heuristics({"BLOCK_N": lambda _: 16})(_two_block_kernel))
+
+        marker = TritonAOT(kernel, {}, compile_options={"enable_fp_fusion": False})
+        self.assertEqual(marker.compile_options, {"enable_fp_fusion": False})
+
+    def test_autotuned_launch_gets_the_options_and_the_config(self) -> None:
+        TritonAOT.set_spec_collector(None)
+        kernel = triton.autotune(
+            configs=[triton.Config({"BLOCK_M": 16, "BLOCK_N": 16}, num_warps=2)],
+            key=[],
+        )(_two_block_kernel)
+        marker = TritonAOT(kernel, {}, compile_options={"enable_fp_fusion": False})
+        x = torch.randn(4, 4)
+
+        with (
+            patch("aot_tensor.types.driver") as config,
+            patch.object(_two_block_kernel, "run", return_value="OUT") as jit_run,
+        ):
+            config.active.get_current_target.return_value = GPUTarget("cuda", 90, 32)
+            out = marker[(1,)](x, x)
+
+        self.assertEqual(out, "OUT")
+        launched = jit_run.call_args.kwargs
+        self.assertEqual(
+            (launched["enable_fp_fusion"], launched["BLOCK_M"], launched["num_warps"]),
+            (False, 16, 2),
+        )
+
+    @parameterized.expand([("options_first", 0), ("plain_first", 1)])
+    def test_markers_of_one_kernel_must_declare_the_same_compile_options(
+        self, _name: str, first: int
+    ) -> None:
+        x = torch.randn(4, 4)
+        markers = [
+            TritonAOT(
+                _two_block_kernel, {}, compile_options={"enable_fp_fusion": False}
+            ),
+            TritonAOT(_two_block_kernel, {}),
+        ]
+        self._launch(markers[first], GPUTarget("cuda", 90, 32), x)
+        collected = get_kernel_specs(TritonAdapter.name)[_two_block_kernel]
+        before = (dict(collected.compile_options), list(collected.specs))
+
+        with (
+            patch("aot_tensor.types.driver"),
+            patch.object(_two_block_kernel, "run") as jit_run,
+            self.assertRaisesRegex(RuntimeError, "its AOT compile can use only one"),
+        ):
+            # A new spec, which collection would have added.
+            markers[1 - first][(1,)](x, x, BLOCK_M=32, BLOCK_N=16)
+
+        jit_run.assert_not_called()
+        self.assertEqual((collected.compile_options, collected.specs), before)
+
+    def test_markers_of_one_autotuned_kernel_must_declare_the_same_options(
+        self,
+    ) -> None:
+        kernel = triton.autotune(
+            configs=[triton.Config({"BLOCK_M": 16, "BLOCK_N": 16})], key=[]
+        )(_two_block_kernel)
+        unfused = TritonAOT(kernel, {}, compile_options={"enable_fp_fusion": False})
+        x = torch.randn(4, 4)
+        collect(unfused, x, x)
+
+        # Recorded under the marker's fn, the autotuner the AOT compile takes.
+        collected = get_kernel_specs(TritonAdapter.name)
+        self.assertEqual(list(collected), [kernel])
+        self.assertEqual(collected[kernel].compile_options, {"enable_fp_fusion": False})
+        with self.assertRaisesRegex(RuntimeError, "its AOT compile can use only one"):
+            collect(TritonAOT(kernel, {}), x, x)
+
+    def test_options_are_recorded_when_collection_raises_partway(self) -> None:
+        marker = TritonAOT(
+            _mul_add, {"N": "i32"}, compile_options={"enable_fp_fusion": False}
+        )
+        x = torch.randn(1024)
+        # The annotated spec is stored before the inferred one refuses the bool.
+        with self.assertRaisesRegex(RuntimeError, "is a bool"):
+            collect(marker, x, x, True, BLOCK=1024)
+
+        collect(marker, x, x, 1024, BLOCK=1024)
+        self.assertEqual(
+            get_kernel_specs(TritonAdapter.name)[_mul_add].compile_options,
+            {"enable_fp_fusion": False},
+        )
+
+    def test_stacked_markers_with_different_options_do_not_compile(self) -> None:
+        inner = TritonAOT(
+            _two_block_kernel, {}, compile_options={"enable_fp_fusion": False}
+        )
+        # Launching the outer marker collects under both markers' fns.
+        self._launch(TritonAOT(inner, {}), GPUTarget("cuda", 90, 32), torch.randn(4, 4))
+        self.assertEqual(
+            [
+                kspec.compile_options
+                for kspec in get_kernel_specs(TritonAdapter.name).values()
+            ],
+            [{}, {"enable_fp_fusion": False}],
+        )
+
+        with (
+            patch(f"{_DSL_MOD}.compile_to_cpp") as compile_to_cpp,
+            self.assertRaisesRegex(RuntimeError, "would build into one directory"),
+        ):
+            self._compile_and_build()
+        compile_to_cpp.assert_not_called()
+
+    @parameterized.expand([("plain", {}), ("unfused", {"enable_fp_fusion": False})])
+    def test_stacked_markers_with_the_same_options_compile(
+        self, _name: str, options: Dict[str, bool]
+    ) -> None:
+        inner = TritonAOT(_two_block_kernel, {}, compile_options=options)
+        outer = TritonAOT(inner, {}, compile_options=options)
+        self._launch(outer, GPUTarget("cuda", 90, 32), torch.randn(4, 4))
+
+        with patch(f"{_DSL_MOD}.compile_to_cpp") as compile_to_cpp:
+            self._compile_and_build()
+        self.assertEqual(
+            [c.kwargs["compile_options"] for c in compile_to_cpp.call_args_list],
+            [options, options],
+        )
+
+    @parameterized.expand([("unfused_first", True), ("plain_first", False)])
+    def test_kernels_compile_with_their_own_options(
+        self, _name: str, unfused_first: bool
+    ) -> None:
+        unfused = TritonAOT(_mul_add, {}, compile_options={"enable_fp_fusion": False})
+        plain = TritonAOT(_two_block_kernel, {})
+        x = torch.randn(1024)
+        launches = [
+            lambda: collect(unfused, x, x, 1024, BLOCK=1024),
+            lambda: collect(plain, x, x, BLOCK_M=16, BLOCK_N=16),
+        ]
+        for launch in launches if unfused_first else reversed(launches):
+            launch()
+
+        with patch(f"{_DSL_MOD}.compile_to_cpp") as compile_to_cpp:
+            self._compile_and_build()
+        self.assertEqual(
+            {
+                c.kwargs["func"]: c.kwargs["compile_options"]
+                for c in compile_to_cpp.call_args_list
+            },
+            {_mul_add: {"enable_fp_fusion": False}, _two_block_kernel: {}},
+        )
+
+    def _compile_and_build(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch(f"{_DSL_MOD}.build_triton_aot_extension", return_value="k.so"),
+        ):
+            TritonAdapter().compile_and_build(
+                CompileContext(
+                    tmpdir,
+                    importlib.import_module,
+                    [TritonCompileConfig(gpu_target=GPUTarget("cuda", 80, 32))],
+                )
+            )
+
+    @parameterized.expand(
+        [("plain", {}, True), ("unfused", {"enable_fp_fusion": False}, False)]
+    )
+    def test_aot_compile_uses_the_options_collection_recorded(
+        self, _name: str, compile_options: Dict[str, bool], fused: bool
+    ) -> None:
+        # The module attribute named after ``_mul_add`` is the JIT function, as
+        # when ``triton_aot(...)`` wraps an imported kernel.
+        marker = TritonAOT(_mul_add, {}, compile_options=compile_options)
+        target = GPUTarget("cuda", 80, 32)
+        x = torch.randn(1024)
+        with (
+            patch("aot_tensor.types.driver") as config,
+            patch.object(_mul_add, "run"),
+        ):
+            config.active.get_current_target.return_value = target
+            marker[(1,)](x, x, x.numel(), BLOCK=1024)
+
+        compiled: List[Any] = []
+        compile_ = triton.compiler.compile
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            compiled.append(compile_(*args, **kwargs))
+            return compiled[-1]
+
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch(
+                "aot_tensor.compile.triton.pipeline.triton.compiler.compile",
+                side_effect=spy,
+            ),
+            patch(f"{_DSL_MOD}.build_triton_aot_extension", return_value="k.so"),
+        ):
+            TritonAdapter().compile_and_build(
+                CompileContext(
+                    tmpdir,
+                    importlib.import_module,
+                    [TritonCompileConfig(gpu_target=target)],
+                )
+            )
+
+        (kernel,) = compiled
+        self.assertEqual(kernel.metadata.enable_fp_fusion, fused)
+        self.assertEqual("fma.rn.f32" in kernel.asm["ptx"], fused)
+        self.assertEqual("mul.rn.f32" in kernel.asm["ptx"], not fused)
+
+    @parameterized.expand(
+        [
+            ("jit", lambda: _two_block_kernel, {"BLOCK_M": 16, "BLOCK_N": 16}),
+            (
+                "autotuned",
+                lambda: triton.autotune(
+                    configs=[triton.Config({"BLOCK_M": 16, "BLOCK_N": 16})], key=[]
+                )(_two_block_kernel),
+                {},
+            ),
+        ]
+    )
+    def test_wrapper_needs_the_options_the_kernel_was_compiled_with(
+        self,
+        _name: str,
+        make_kernel: Callable[[], KernelInterface[Any]],
+        launch_kwargs: Dict[str, int],
+    ) -> None:
+        kernel = make_kernel()
+        plain = TritonAOT(kernel, {})
+        x = torch.randn(4, 4)
+        collect(plain, x, x, **launch_kwargs)
+        unfused = TritonAOT(kernel, {}, compile_options={"enable_fp_fusion": False})
+
+        with (
+            patch(f"{_DSL_MOD}.TritonAOTOperatorTransform"),
+            patch(f"{_DSL_MOD}.generate_wrapper_files_skeleton") as skeleton,
+        ):
+            TritonAdapter().generate_wrapper_files(MagicMock(), plain, "/unused", None)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"_two_block_kernel was compiled with compile_options \{\}, but .* "
+                r"declares \{'enable_fp_fusion': False\}",
+            ):
+                TritonAdapter().generate_wrapper_files(
+                    MagicMock(), unfused, "/unused", None
+                )
+        skeleton.assert_called_once()
+
+
+class TritonAOTDynamoTest(unittest.TestCase):
+    """``torch.compile`` and strict ``torch.export`` trace ``TritonAOT.run``
+    with dynamo, which cannot trace into the Triton driver."""
+
+    def tearDown(self) -> None:
+        TritonAOT._instances.clear()
+
+    def test_a_marker_without_compile_options_traces_to_its_kernel(self) -> None:
+        class _Kernel(KernelInterface[Callable[..., Any]]):
+            def run(self, x: torch.Tensor, *, grid: Any, warmup: bool) -> torch.Tensor:
+                return x + 1
+
+        marker = TritonAOT(_Kernel(), {})
+        traced = torch.compile(
+            lambda x: marker[(1,)](x), backend="eager", fullgraph=True
+        )
+        self.assertEqual(traced(torch.zeros(1)).item(), 1.0)
 
 
 class _ReducesToEmptyDict(dict):
