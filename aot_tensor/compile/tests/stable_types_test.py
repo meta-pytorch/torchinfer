@@ -86,6 +86,15 @@ class StableTypesTest(unittest.TestCase):
             f"{dtype} maps to different ScalarTypes in the two tables",
         )
 
+    def test_fp8_torch_dtypes_agree_with_triton_fp8_keys(self) -> None:
+        """FlyDSL keys fp8 tensors on the torch dtype string; Triton on the mangled one."""
+        self.assertEqual(
+            TORCH_DTYPE_TO_STABLE[str(torch.float8_e4m3fn)], SCALAR_TYPES["*fp8e4nv"]
+        )
+        self.assertEqual(
+            TORCH_DTYPE_TO_STABLE[str(torch.float8_e4m3fnuz)], SCALAR_TYPES["*fp8e4b8"]
+        )
+
     def test_table_renders_only_reachable_keys(self) -> None:
         """Every key should be something the mangler can emit.
 

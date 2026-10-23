@@ -3,6 +3,7 @@
 import ast
 import unittest
 
+import torch
 from aot_tensor.transform.marker_call_transform import MarkerCallTransform
 from parameterized import parameterized
 
@@ -52,4 +53,31 @@ class MarkerCallTransformTest(unittest.TestCase):
         )
         self.assertEqual(
             _transform().generate_so_loading_code(without_call, "/out"), ""
+        )
+
+    def test_python_meta_kernel_only_when_requested(self) -> None:
+        with_call = ast.parse("def f(x):\n    _add_aot(x)\n")
+        meta_impl = 'torch.library.impl("aot_tensor::_dsl_add", "Meta"'
+        self.assertNotIn(
+            meta_impl, _transform().generate_so_loading_code(with_call, "/out")
+        )
+        transform = _transform()
+        transform.python_meta_kernel = True
+        self.assertIn(meta_impl, transform.generate_so_loading_code(with_call, "/out"))
+
+    def test_python_meta_kernel_registers_once_per_process(self) -> None:
+        torch.library.define("aot_tensor::_dsl_add", "(Tensor x) -> ()")
+        transform = _transform()
+        transform.python_meta_kernel = True
+        code = transform.generate_so_loading_code(
+            ast.parse("def f(x):\n    _add_aot(x)\n"), "/out"
+        )
+        meta_only = code.replace('torch.ops.load_library("/out/kdir/dsl_add.so")', "")
+        # Two wrapper modules of the same op, e.g. two PackageImporters.
+        exec(meta_only, {})
+        exec(meta_only, {})
+        self.assertTrue(
+            torch._C._dispatch_has_kernel_for_dispatch_key(
+                "aot_tensor::_dsl_add", "Meta"
+            )
         )

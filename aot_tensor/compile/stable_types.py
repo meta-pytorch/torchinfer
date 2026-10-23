@@ -49,6 +49,8 @@ TORCH_DTYPE_TO_STABLE: dict[str, str] = {
     "torch.float32": "torch::headeronly::ScalarType::Float",
     "torch.float64": "torch::headeronly::ScalarType::Double",
     "torch.bfloat16": "torch::headeronly::ScalarType::BFloat16",
+    "torch.float8_e4m3fn": "torch::headeronly::ScalarType::Float8_e4m3fn",
+    "torch.float8_e4m3fnuz": "torch::headeronly::ScalarType::Float8_e4m3fnuz",
 }
 
 # Stable ABI override: str → "std::string" instead of "at::string".

@@ -56,8 +56,10 @@ class _ScalarDtype:
 
 
 _SCALAR_DTYPES: dict[str, _ScalarDtype] = {
-    "i32": _ScalarDtype("int64_t", "int", "int32", "int32_t"),
-    "i64": _ScalarDtype("int64_t", "int", "int64", "int64_t"),
+    # SymInt so export keeps a dynamic size (e.g. numel()) dynamic; the stable
+    # ABI still passes an int.
+    "i32": _ScalarDtype("int64_t", "SymInt", "int32", "int32_t"),
+    "i64": _ScalarDtype("int64_t", "SymInt", "int64", "int64_t"),
     "fp32": _ScalarDtype("double", "float", "float", "float"),
     "bool": _ScalarDtype("bool", "bool", "bool", "bool"),
 }
@@ -106,8 +108,10 @@ def _unwrap_tensors(arg_specs: list[FlyArgSpec]) -> list[str]:
     ]
 
 
-def _schema_param(index: int, spec: FlyArgSpec) -> str:
+def _schema_param(index: int, spec: FlyArgSpec, mutated: frozenset[str]) -> str:
     if isinstance(spec, FlyTensorArg):
+        if spec.name not in mutated:
+            return f"Tensor? {spec.name}"
         return f"Tensor({chr(ord('a') + index)}!)? {spec.name}"
     if isinstance(spec, ScalarArg):
         return f"{_SCALAR_DTYPES[spec.dtype].schema} {spec.name}"
@@ -285,7 +289,10 @@ def _externs(exported: ExportedLauncher) -> str:
 
 
 def generate_torch_op_content(
-    op_name: str, arg_specs: list[FlyArgSpec], variants: list[FlyVariant]
+    op_name: str,
+    arg_specs: list[FlyArgSpec],
+    variants: list[FlyVariant],
+    mutated: frozenset[str],
 ) -> str:
     _validate_specs(op_name, arg_specs)
     specs = _Specs(
@@ -296,7 +303,9 @@ def generate_torch_op_content(
         _validate_abi(op_name, specs, fly.exported.abi)
     cpp_params = ", ".join(_cpp_param(s) for s in arg_specs)
     op_params = ", ".join(_op_param(s) for s in arg_specs)
-    schema_params = ", ".join(_schema_param(i, s) for i, s in enumerate(arg_specs))
+    schema_params = ", ".join(
+        _schema_param(i, s, mutated) for i, s in enumerate(arg_specs)
+    )
     call_args = ", ".join(spec.name for spec in arg_specs)
 
     selector = render_selector(

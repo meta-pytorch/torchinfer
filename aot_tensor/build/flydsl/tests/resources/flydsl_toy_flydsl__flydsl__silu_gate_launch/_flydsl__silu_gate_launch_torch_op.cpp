@@ -23,7 +23,7 @@
 // __FLYDSL_AOT_GENERATE_BEGIN__ OP_NAME
 #define FLYDSL_OP_NAMESPACE aot_tensor
 #define FLYDSL_OP_NAME "_flydsl__silu_gate_launch"
-#define FLYDSL_OP_SCHEMA "_flydsl__silu_gate_launch(Tensor(a!)? A, Tensor(b!)? B, Tensor(c!)? C, Tensor(d!)? Out, int n, bool SUBTRACT) -> ()"
+#define FLYDSL_OP_SCHEMA "_flydsl__silu_gate_launch(Tensor(a!)? A, Tensor(b!)? B, Tensor(c!)? C, Tensor(d!)? Out, SymInt n, bool SUBTRACT) -> ()"
 // __FLYDSL_AOT_GENERATE_END__ OP_NAME
 
 // Exported by the FlyDSL launcher objects linked into this .so, one set per
@@ -272,9 +272,5 @@ STABLE_TORCH_LIBRARY_IMPL(FLYDSL_OP_NAMESPACE, CUDA, m) {
 }
 
 STABLE_TORCH_LIBRARY_IMPL(FLYDSL_OP_NAMESPACE, CPU, m) {
-  m.impl(FLYDSL_OP_NAME, TORCH_BOX(&flydsl_dummy_op));
-}
-
-STABLE_TORCH_LIBRARY_IMPL(FLYDSL_OP_NAMESPACE, Meta, m) {
   m.impl(FLYDSL_OP_NAME, TORCH_BOX(&flydsl_dummy_op));
 }

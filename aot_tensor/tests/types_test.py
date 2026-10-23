@@ -10,7 +10,7 @@ from unittest.mock import call, MagicMock, patch
 
 from aot_tensor.arg_specs.common import ScalarArg
 from aot_tensor.arg_specs.cute import CuTeTensorArg
-from aot_tensor.arg_specs.fly import FlyTensorArg
+from aot_tensor.arg_specs.fly import FlyArgSpec, FlyTensorArg
 from aot_tensor.compile.aott_compile import enable_spec_collection
 from aot_tensor.compile.compile_state import get_aott_compile_state
 from aot_tensor.compile.cutedsl import eager as cutedsl_eager
@@ -324,3 +324,18 @@ class FlyAOTTest(_MarkerResetTest):
             get_flydsl_aot_dir_name(op), "flydsl_types_test__flydsl_vec_launch"
         )
         self.assertIs(op, FlyAOT.get_instances()[-1])
+
+    def test_mutates_args_defaults_to_every_tensor(self) -> None:
+        def launch() -> None:
+            pass
+
+        specs: list[FlyArgSpec] = [
+            FlyTensorArg("out"),
+            FlyTensorArg("w"),
+            ScalarArg("n", "i32"),
+        ]
+        jit_fn = SimpleNamespace(func=launch)
+        self.assertEqual(flydsl_aot(jit_fn, specs).mutated, {"out", "w"})
+        self.assertEqual(flydsl_aot(jit_fn, specs, ("out",)).mutated, {"out"})
+        with self.assertRaisesRegex(RuntimeError, r"\['n'\] are not tensor args"):
+            flydsl_aot(jit_fn, specs, ("out", "n"))

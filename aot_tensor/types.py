@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Callable, ClassVar, Dict, List, Optional, Union
+from typing import Any, Callable, ClassVar, Dict, List, Literal, Optional, Union
 
 import torch
 
@@ -13,7 +14,7 @@ import torch
 import triton
 from aot_tensor.arg_specs.common import module_basename_for_callable
 from aot_tensor.arg_specs.cute import CuTeArgSpec
-from aot_tensor.arg_specs.fly import FlyArgSpec
+from aot_tensor.arg_specs.fly import FlyArgSpec, FlyTensorArg
 from aot_tensor.compile.triton.utils import is_autotuner
 from triton.runtime.jit import KernelInterface
 
@@ -199,9 +200,18 @@ class FlyAOT(AOTTMarker, metaclass=AOTTMarkerMeta):
 
     ``arg_specs`` lists every launcher parameter except the ``fx.Stream`` one,
     which is always filled with the current stream (eager and AOT alike).
+
+    ``mutates_args``: the tensors the launcher writes (default: all). The rest
+    are read-only in the op schema, so torch.export does not turn weights
+    passed to them into extra outputs.
     """
 
-    def __init__(self, jit_fn: Any, arg_specs: list[FlyArgSpec]) -> None:
+    def __init__(
+        self,
+        jit_fn: Any,
+        arg_specs: list[FlyArgSpec],
+        mutates_args: Iterable[str] | Literal["unknown"] = "unknown",
+    ) -> None:
         # A @flyc.jit JitFunction keeps the user function on ``.func``.
         fn: Any = jit_fn.func
         self.name: str = f"_flydsl_{fn.__name__}"
@@ -212,6 +222,15 @@ class FlyAOT(AOTTMarker, metaclass=AOTTMarkerMeta):
         if not self.name.replace("_", "").isalnum():
             raise RuntimeError(
                 f"FlyAOT: derived invalid op name {self.name!r} from launcher."
+            )
+        tensors = {s.name for s in arg_specs if isinstance(s, FlyTensorArg)}
+        self.mutated: frozenset[str] = frozenset(
+            tensors if mutates_args == "unknown" else mutates_args
+        )
+        if not self.mutated <= tensors:
+            raise RuntimeError(
+                f"FlyAOT {self.name}: mutates_args {sorted(self.mutated - tensors)} "
+                f"are not tensor args {sorted(tensors)}."
             )
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
@@ -249,8 +268,12 @@ def cutedsl_aot(
     return CuTeAOT(jit_fn=jit_fn, arg_specs=arg_specs)
 
 
-def flydsl_aot(jit_fn: Any, arg_specs: list[FlyArgSpec]) -> FlyAOT:
-    return FlyAOT(jit_fn=jit_fn, arg_specs=arg_specs)
+def flydsl_aot(
+    jit_fn: Any,
+    arg_specs: list[FlyArgSpec],
+    mutates_args: Iterable[str] | Literal["unknown"] = "unknown",
+) -> FlyAOT:
+    return FlyAOT(jit_fn=jit_fn, arg_specs=arg_specs, mutates_args=mutates_args)
 
 
 def get_all_triton_aot_instances() -> List[TritonAOT]:

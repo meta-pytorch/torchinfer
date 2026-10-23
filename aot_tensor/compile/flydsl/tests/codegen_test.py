@@ -56,13 +56,23 @@ _SLOW = _variant("bbbb", "fast == false")
 
 class GenerateTorchOpTest(unittest.TestCase):
     def _render(self, *variants: FlyVariant) -> str:
-        return generate_torch_op_content(_OP, _SPECS, list(variants or (_FAST,)))
+        return generate_torch_op_content(
+            _OP, _SPECS, list(variants or (_FAST,)), frozenset({"x"})
+        )
 
-    def test_namespace_and_schema(self) -> None:
-        out = self._render()
+    @parameterized.expand(
+        [
+            ("mutated", frozenset({"x"}), "Tensor(a!)? x"),
+            ("read_only", frozenset(), "Tensor? x"),
+        ]
+    )
+    def test_namespace_and_schema(
+        self, _name: str, mutated: frozenset[str], tensor: str
+    ) -> None:
+        out = generate_torch_op_content(_OP, _SPECS, [_FAST], mutated)
         self.assertIn(f"#define FLYDSL_OP_NAMESPACE {DEFAULT_OP_NAMESPACE_PREFIX}", out)
         self.assertIn(
-            f'#define FLYDSL_OP_SCHEMA "{_OP}(Tensor(a!)? x, int n, bool fast) -> ()"',
+            f'#define FLYDSL_OP_SCHEMA "{_OP}({tensor}, SymInt n, bool fast) -> ()"',
             out,
         )
 

@@ -30,6 +30,9 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 
 class FlyAOTOperatorTransform(MarkerCallTransform):
+    # flydsl_torch_op.cpp registers no Meta kernel; see MarkerCallTransform.
+    python_meta_kernel: bool = True
+
     def __init__(self, kernel: FlyAOT, global_names: set[str]) -> None:
         super().__init__(op_name=kernel.name, global_names=global_names)
         self._kernel: FlyAOT = kernel

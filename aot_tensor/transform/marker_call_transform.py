@@ -16,11 +16,24 @@ import torch
 torch.ops.load_library("{so_path}")
 """
 
+# Meta is a no-op: the op writes in place and returns (). It lives in Python
+# because the stable-ABI shim turns SymInt into int before a C++ Meta runs.
+# The check skips registering it twice for the same op in one process.
+# TODO: make this the default once Triton/CuTeDSL ops also drop their C++ Meta.
+_PYTHON_META_TMPL = """if not torch._C._dispatch_has_kernel_for_dispatch_key(
+    "{namespace}::{op_name}", "Meta"
+):
+    torch.library.impl("{namespace}::{op_name}", "Meta", lambda *args, **kwargs: None)
+"""
+
 
 class MarkerCallTransform(ast.NodeTransformer):
     """Rewrites ``marker(...)`` to ``torch.ops.aot_tensor.{op_name}(...)`` and
     emits the ``.so`` load. Subclasses supply where the built ``.so`` lives
-    (``kernel_dir``)."""
+    (``kernel_dir``) and whether the ``.so`` leaves the Meta kernel to Python
+    (``python_meta_kernel``)."""
+
+    python_meta_kernel: bool = False
 
     def __init__(self, op_name: str, global_names: set[str]) -> None:
         super().__init__()
@@ -85,4 +98,9 @@ class MarkerCallTransform(ast.NodeTransformer):
         so_path = os.path.join(
             abs_triton_aot_path, self.kernel_dir(), f"{self._op_name.lstrip('_')}.so"
         )
-        return _SO_LOADING_TMPL.format(so_path=so_path)
+        code = _SO_LOADING_TMPL.format(so_path=so_path)
+        if self.python_meta_kernel:
+            code += _PYTHON_META_TMPL.format(
+                namespace=DEFAULT_OP_NAMESPACE_PREFIX, op_name=self._op_name
+            )
+        return code

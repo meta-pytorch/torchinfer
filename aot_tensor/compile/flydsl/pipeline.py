@@ -60,5 +60,5 @@ def compile_flydsl_to_cpp(
         variants.append(FlyVariant(variant, exported))
 
     with open(os.path.join(install_dir, f"{op.name}_torch_op.cpp"), "w") as fp:
-        fp.write(generate_torch_op_content(op.name, op.arg_specs, variants))
+        fp.write(generate_torch_op_content(op.name, op.arg_specs, variants, op.mutated))
     return [fly.exported.object_path for fly in variants]
