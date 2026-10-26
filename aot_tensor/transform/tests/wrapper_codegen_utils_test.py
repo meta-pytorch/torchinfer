@@ -25,6 +25,7 @@ from aot_tensor.transform.wrapper_codegen_utils import (
     find_sole_marker_in_globals,
     generate_wrapper_files_skeleton,
 )
+from parameterized import parameterized
 from torch.package import PackageExporter, PackageImporter
 
 
@@ -170,16 +171,24 @@ class TestGetModuleAndSource(unittest.TestCase):
         self.assertIsNotNone(fn_module)
         self.assertIn("def sample_target", fn_source)
 
+    @parameterized.expand(
+        [
+            ("aot_tensor.fb.ops.triton_layer_norm",),
+            # Archives exported before the ops move intern wrappers as triton_aot.ops.
+            ("triton_aot.ops.triton_layer_norm",),
+        ]
+    )
     @patch("aot_tensor.transform.wrapper_codegen_utils._extract_function_source")
     def test_handles_torch_package_module(
         self,
+        real_module_name: str,
         mock_extract: MagicMock,
     ) -> None:
         """Test handling of torch.package loaded module."""
         mock_extract.return_value = "def target_fn(): pass"
 
         mock_target = MagicMock()
-        mock_target.__module__ = "<torch_package_0>.triton_aot.ops.triton_layer_norm"
+        mock_target.__module__ = f"<torch_package_0>.{real_module_name}"
         mock_target.__name__ = "target_fn"
 
         mock_importer = MagicMock()
@@ -191,12 +200,8 @@ class TestGetModuleAndSource(unittest.TestCase):
             mock_target, mock_importer
         )
 
-        mock_importer.get_source.assert_called_once_with(
-            "triton_aot.ops.triton_layer_norm"
-        )
-        mock_importer.import_module.assert_called_once_with(
-            "triton_aot.ops.triton_layer_norm"
-        )
+        mock_importer.get_source.assert_called_once_with(real_module_name)
+        mock_importer.import_module.assert_called_once_with(real_module_name)
         mock_extract.assert_called_once_with("module source code", "target_fn")
 
         self.assertEqual(fn_module, mock_imported_module)

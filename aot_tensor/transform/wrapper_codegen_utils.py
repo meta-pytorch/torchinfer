@@ -25,9 +25,11 @@ from aot_tensor.transform.import_utils import (
 from pyre_extensions import none_throws
 from torch import package
 
-# Module prefixes allowed on the torch.package source-extraction path
-# (aot_tensor.ops is here ahead of the ops/ move).
+# Module prefixes allowed on the torch.package source-extraction path.
+# Archives exported before the kernel wrappers moved to aot_tensor.fb.ops intern
+# them as triton_aot.ops; aot_tensor.ops is kept for a future package.
 _ALLOWED_MODULE_PREFIXES: tuple[str, ...] = (
+    "aot_tensor.fb.ops",
     "triton_aot.ops",
     "prime_perf_optimizer",
     "aot_tensor.ops",
