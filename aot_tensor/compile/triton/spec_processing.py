@@ -436,8 +436,19 @@ def gen_compile_arg(
     for idx in spec.pointer_range_32:
         new_attrs.setdefault((idx,), []).append(["tt.pointer_range", 32])
 
+    source_cls: type[ASTSource] = ASTSource
+    # Gluon kernels carry explicit layouts and must be traced with Gluon
+    # semantics; plain ASTSource would lower their builtins as Triton ones.
+    # Not `func.ASTSource`: Triton sets that per instance in create_binder(),
+    # at a function's first GPU launch, and the functions compiled here are
+    # typically fresh torch.package imports that never launched.
+    if func.is_gluon():
+        from triton.experimental.gluon._runtime import GluonASTSource
+
+        source_cls = GluonASTSource
+
     return (
-        ASTSource(
+        source_cls(
             func,
             new_signature,
             constexprs=new_constants,

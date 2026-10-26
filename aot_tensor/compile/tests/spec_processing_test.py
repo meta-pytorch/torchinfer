@@ -51,6 +51,10 @@ from triton import knobs
 from triton.backends import backends as triton_backends
 from triton.backends.amd.compiler import HIPOptions
 from triton.backends.compiler import GPUTarget
+from triton.compiler.compiler import ASTSource
+from triton.experimental import gluon
+from triton.experimental.gluon import language as ttgl
+from triton.experimental.gluon._runtime import GluonASTSource
 
 _HIP_DEFAULT_WAVES_PER_EU: int = HIPOptions.__dataclass_fields__["waves_per_eu"].default
 
@@ -249,6 +253,53 @@ class GenCompileArgTest(unittest.TestCase):
             [["tt.divisibility", 16], ["tt.pointer_range", 32]],
         )
         self.assertEqual(ast_source.attrs[(1,)], [["tt.pointer_range", 32]])
+
+
+@gluon.jit
+def _gluon_copy(x_ptr, y_ptr, BLOCK: ttgl.constexpr):
+    layout: ttgl.constexpr = ttgl.BlockedLayout([1], [64], [4], [0])
+    offs = ttgl.arange(0, BLOCK, layout=layout)
+    x = ttgl.amd.cdna3.buffer_load(ptr=x_ptr, offsets=offs)
+    ttgl.amd.cdna3.buffer_store(stored_value=x, ptr=y_ptr, offsets=offs)
+
+
+def _gluon_copy_spec() -> KernelSpec:
+    return KernelSpec(
+        signature={0: "*fp16", 1: "*fp16"},
+        constants={2: 256},
+        divisible_by_16={0, 1},
+        divisible_by_8=set(),
+    )
+
+
+class GenCompileArgGluonTest(unittest.TestCase):
+    def test_gluon_kernel_gets_gluon_ast_source(self) -> None:
+        ast_source = gen_compile_arg(_gluon_copy_spec(), _gluon_copy)[0]
+        self.assertIsInstance(ast_source, GluonASTSource)
+        self.assertEqual(ast_source.signature["BLOCK"], "constexpr")
+        self.assertEqual(ast_source.attrs[(0,)], [["tt.divisibility", 16]])
+
+    def test_triton_kernel_keeps_plain_ast_source(self) -> None:
+        spec = KernelSpec(
+            signature={0: "*fp32"},
+            constants={},
+            divisible_by_16=set(),
+            divisible_by_8=set(),
+        )
+        self.assertIs(type(gen_compile_arg(spec, _addmm_fwd)[0]), ASTSource)
+
+    def test_gluon_kernel_compiles_for_gfx950(self) -> None:
+        if "amd" not in triton.backends.backends:
+            self.skipTest("Triton build has no AMD backend")
+        target = GPUTarget("hip", "gfx950", 64)
+        kernel = triton.compiler.compile(
+            *gen_compile_arg(_gluon_copy_spec(), _gluon_copy),
+            target=target,
+            options={"num_warps": 4},
+        )
+        self.assertEqual(kernel.metadata.name, "_gluon_copy")
+        self.assertIn(".amdhsa_kernel _gluon_copy", kernel.asm["amdgcn"])
+        self.assertGreater(len(kernel.asm["hsaco"]), 0)
 
 
 class ValidateConvertedSpecsTest(unittest.TestCase):
