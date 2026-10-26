@@ -8,8 +8,8 @@ Triton versions.
 import math
 from typing import Any
 
-# Importing triton requires torch at runtime.
-# @dep=fbsource//third-party/pypi/torch:torch
+# Backend runtime dependencies belong to the selected Triton target. This
+# helper also serves pinned offline CUDA compilation without a Torch runtime.
 # @manual=//triton:triton
 import triton
 from packaging.version import Version
