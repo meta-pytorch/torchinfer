@@ -262,6 +262,9 @@ class KernelSpec:
     divisible_by_8: set[int]
     autotune: AutotuneAttrs = dataclasses.field(default_factory=AutotuneAttrs)
     pointer_range_32: set[int] = dataclasses.field(default_factory=set)
+    # Optional provenance (e.g. a kernel-foundry Template rung name),
+    # carried from collection into the generated selector as a comment.
+    label: str | None = None
 
 
 @dataclass
@@ -784,11 +787,13 @@ def _convert_raw_specs(
         )
         three_tuple_optional |= constraints.optional_args
 
+        raw_label = raw_spec.get("label")
         spec = KernelSpec(
             signature=signature,
             constants=constants,
             divisible_by_16=constraints.divisible_by_16,
             divisible_by_8=constraints.divisible_by_8,
+            label=raw_label if isinstance(raw_label, str) else None,
         )
 
         if constraints.has_fp8:
@@ -899,7 +904,12 @@ def _dedup_specs(specs: list[KernelSpec]) -> list[KernelSpec]:
     duplicated_specs: list[KernelSpec] = []
     hash_spec_ids: set[str] = set()
     for spec in specs:
-        id = hash_spec(dataclasses.asdict(spec))
+        # Identity EXCLUDES the provenance label: two differently-labeled
+        # base specs whose expanded cells coincide must still collapse
+        # (duplicate kernel names would fail validate_unique_kernel_names).
+        as_dict = dataclasses.asdict(spec)
+        as_dict.pop("label", None)
+        id = hash_spec(as_dict)
         if id in hash_spec_ids:
             duplicated_specs.append(spec)
         else:
