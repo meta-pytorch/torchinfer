@@ -75,6 +75,11 @@ def transform_kernels(
        rewrites kernel[grid](...) -> torch.ops.aot_tensor.kernel(...),
        writes {fn}_wrapper.py
     2. replace_kernels: loads wrappers and replaces graph node targets
+
+    Both steps edit ``fx_m`` in place, so take the weight signature first.
     """
+    signature = get_weight_signature(fx_m)
     kernel_wrapper_codegen(fx_m, package_importer)
-    return replace_kernels(fx_m, package_importer=package_importer)
+    lowered = replace_kernels(fx_m, package_importer=package_importer)
+    assert_weight_signature_matches(signature, lowered, "transform_kernels")
+    return lowered
