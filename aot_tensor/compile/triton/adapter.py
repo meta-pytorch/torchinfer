@@ -77,6 +77,7 @@ def _collect_triton_spec(
     fn: KernelInterface[Callable[..., Any]],
     annotations: Dict[str, Annotation],
     *args: Any,
+    label: Optional[str] = None,
     **kwargs: Any,
 ) -> None:
     """Record the specs for one Triton kernel call (invoked by ``collect``).
@@ -90,6 +91,10 @@ def _collect_triton_spec(
     _ensure_multi_config_autotuner(fn)
     spec = infer_spec(fn, annotations, *args, **kwargs)
     annotated_hash = hash_spec(spec)
+    if label is not None:
+        # AFTER hashing: provenance only, never spec identity (two markers
+        # producing one spec dedupe regardless of labels; first label wins).
+        spec["label"] = label
     add_spec(TRITON, fn, spec, annotated_hash)
 
     if annotations:
@@ -100,6 +105,8 @@ def _collect_triton_spec(
         if _annotation_conflicts_with_sample(
             fn, annotations, *args, **kwargs
         ) or _inferred_has_perf_advantage(spec, inferred):
+            if label is not None:
+                inferred["label"] = f"{label} (inferred)"
             add_spec(TRITON, fn, inferred, inferred_hash)
 
 
@@ -140,8 +147,8 @@ def _unwrap_triton_fn(
 
 
 def _inferred_has_perf_advantage(
-    annotated_spec: Dict[str, List[Any]],
-    inferred_spec: Dict[str, List[Any]],
+    annotated_spec: Dict[str, Any],
+    inferred_spec: Dict[str, Any],
 ) -> bool:
     """True if inferred spec has alignment/divisibility hints the annotated lacks.
 
@@ -254,7 +261,7 @@ def infer_spec(  # noqa: C901
     annotations: Dict[str, Annotation],
     *args: Any,
     **kwargs: Any,
-) -> Dict[str, List[Any]]:
+) -> Dict[str, Any]:
     """Infer kernel spec from sample args.
 
     Tensor dtype: ``mangle_type``, alignment: ``data_ptr() % 16``.
@@ -637,7 +644,13 @@ def collect(
             f"but its AOT compile can use only one."
         )
     try:
-        _collect_triton_spec(marker.fn, marker.annotations, *args, **kwargs)
+        _collect_triton_spec(
+            marker.fn,
+            marker.annotations,
+            *args,
+            label=getattr(marker, "label", None),
+            **kwargs,
+        )
     finally:
         # Also when collection raises after storing a spec.
         collected = kernel_specs.get(marker.fn)

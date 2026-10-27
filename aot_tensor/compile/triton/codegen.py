@@ -770,6 +770,10 @@ def gen_guarded_calls(
             descriptors, spec.signature, indent=_CALL_ARG_INDENT
         )
         lines = [g.render() for g in spec_guards(spec, desc_by_idx, autotune_fields)]
+        if spec.label is not None:
+            # Provenance comment (e.g. the kernel-foundry Template rung this
+            # spec was declared as) — inspection aid, zero behavior.
+            lines.insert(0, f"{' ' * _INDENT}// spec: {spec.label}")
         # Built as a list so a spec with no guards emits a bare return rather
         # than a leading blank line.
         lines.append(
