@@ -90,7 +90,10 @@ def _get_num_ctas(kernel: Any) -> int:
     return math.prod(_get_cluster_dims(kernel))
 
 
-def get_scratch_parameters(kernel: Any) -> tuple[str, list[str]]:
+def get_scratch_parameters(
+    kernel: Any,
+    device_index_expr: str = "torch::stable::accelerator::getCurrentDeviceIndex()",
+) -> tuple[str, list[str]]:
     """Emit C++ launcher declarations + arg pointers for the two scratch
     slots Triton 3.5+ kernels expect in their ABI.
 
@@ -109,6 +112,10 @@ def get_scratch_parameters(kernel: Any) -> tuple[str, list[str]]:
     AMD-fork builds may omit `global_scratch_size` from `KernelMetadata`;
     `getattr(..., 0)` keeps them on the null path. `profile_scratch` (proton)
     is always null since AOT-T does not enable proton.
+
+    ``device_index_expr`` is the C++ expression for the allocation's device.
+    AOT-T launchers pass the ``device_idx`` local they already read for this
+    launch; other callers (TritonCC) keep the default fresh read.
     """
     declarations = []
     arg_pointers = []
@@ -128,7 +135,7 @@ def get_scratch_parameters(kernel: Any) -> tuple[str, list[str]]:
                 "STABLE_TORCH_ERROR_CODE_CHECK(aoti_torch_empty_strided("
                 "1, _global_scratch_size, _global_scratch_stride, "
                 "aoti_torch_dtype_uint8(), aoti_torch_device_type_cuda(), "
-                "torch::stable::accelerator::getCurrentDeviceIndex(), "
+                f"{device_index_expr}, "
                 "&_global_scratch_handle));",
                 "torch::stable::Tensor _global_scratch_tensor(_global_scratch_handle);",
                 "CUdeviceptr global_scratch = "

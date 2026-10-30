@@ -134,6 +134,21 @@ class GetScratchParametersTest(unittest.TestCase):
         self.assertNotIn("TritonAotScratchGuard", declarations)
         self.assertEqual(arg_pointers, ["&global_scratch", "&profile_scratch"])
 
+    def test_device_index_expression(self) -> None:
+        """Default: a fresh current-device read (TritonCC). AOT-T launchers
+        pass the index they already read for the launch."""
+        default, _ = get_scratch_parameters(_mock_kernel(128))
+        self.assertIn(
+            "torch::stable::accelerator::getCurrentDeviceIndex(), "
+            "&_global_scratch_handle",
+            default,
+        )
+        local, _ = get_scratch_parameters(
+            _mock_kernel(128), device_index_expr="device_idx"
+        )
+        self.assertIn("device_idx, &_global_scratch_handle", local)
+        self.assertNotIn("getCurrentDeviceIndex", local)
+
     @parameterized.expand(
         [
             ("trivial_cluster", (1, 1, 1), 1),

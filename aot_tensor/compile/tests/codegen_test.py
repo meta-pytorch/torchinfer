@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 import triton
 import triton.language as tl
 from aot_tensor.compile.stable_types import SCALAR_TYPES
+from aot_tensor.compile.template_utils import TRITON_TEMPLATES
 from aot_tensor.compile.tests.mocks import MockAutotuner
 from aot_tensor.compile.triton import codegen as codegen_mod
 from aot_tensor.compile.triton.arg_descriptor import (
@@ -36,6 +37,7 @@ from aot_tensor.compile.triton.codegen import (
     gen_launcher,
     gen_launcher_call_args,
     gen_launcher_params,
+    gen_loader,
     gen_selector,
     gen_selector_params,
     gen_selector_proto,
@@ -1964,6 +1966,76 @@ class GenLauncherLevel1Test(unittest.TestCase):
             result,
             f"launcher (launcher_src={with_launcher_src}) put its parameter "
             "list on the signature line",
+        )
+
+    @parameterized.expand(
+        [
+            ("level1", True, 0),
+            ("legacy", False, 0),
+            ("level1_global_scratch", True, 256),
+            ("legacy_global_scratch", False, 256),
+        ]
+    )
+    def test_launcher_reads_device_index_once(
+        self, _name: str, with_launcher_src: bool, global_scratch_size: int
+    ) -> None:
+        """One device-index read per launch, shared by the module-cache
+        lookup, the current-stream query and (NVIDIA TMA kernels) the
+        global-scratch allocation."""
+        kernel = self._make_kernel(with_launcher_src=with_launcher_src)
+        kernel.metadata.global_scratch_size = global_scratch_size
+        launcher = gen_launcher(
+            kernel_name="test_kernel_sm80",
+            func=self._simple_kernel,
+            kernel=kernel,
+            warp_size=32,
+            spec=self._make_spec(),
+            descriptors=self._make_descriptors(),
+            backend="cuda",
+        )
+        loader = gen_loader("test_kernel_sm80", "test_kernel", 0)
+        self.assertEqual(launcher.count("getCurrentDeviceIndex()"), 1)
+        self.assertIn(
+            "const auto device_idx = "
+            "torch::stable::accelerator::getCurrentDeviceIndex();",
+            launcher,
+        )
+        self.assertIn("load_test_kernel_sm80(device_idx);", launcher)
+        self.assertIn(
+            "grid.stream ? grid.stream : triton_aot_get_current_stream(device_idx);",
+            launcher,
+        )
+        read = launcher.index("getCurrentDeviceIndex()")
+        self.assertLess(read, launcher.index("load_test_kernel_sm80("))
+        self.assertLess(read, launcher.index("triton_aot_get_current_stream("))
+        if global_scratch_size:
+            alloc = launcher.index("aoti_torch_empty_strided(")
+            self.assertLess(read, alloc)
+            self.assertIn("device_idx, &_global_scratch_handle", launcher)
+
+        # The loader keys its per-thread cache on the caller's index and no
+        # longer reads one itself.
+        self.assertIn("CUfunction load_test_kernel_sm80(int32_t idx)", loader)
+        self.assertNotIn("getCurrentDeviceIndex", loader)
+        self.assertIn("thread_local std::unordered_map<int32_t, CUfunction>", loader)
+        self.assertIn("cache.find(idx)", loader)
+        self.assertIn("cache.emplace(idx, func)", loader)
+
+    def test_template_stream_getter_takes_the_device_index(self) -> None:
+        kernel_cpp = TRITON_TEMPLATES.load("kernel.cpp")
+        indexed = kernel_cpp.index(
+            "inline cudaStream_t triton_aot_get_current_stream(int32_t device_idx)"
+        )
+        body = kernel_cpp[indexed : kernel_cpp.index("\n}\n", indexed)]
+        self.assertIn("aoti_torch_get_current_cuda_stream(device_idx,", body)
+        self.assertNotIn("getCurrentDeviceIndex", body)
+        # The buck-build anchor reads the index and calls the indexed form.
+        self.assertNotIn("triton_aot_get_current_stream()", kernel_cpp)
+        self.assertIn(
+            "__triton_aot_anchor_get_stream() {\n"
+            "  return triton_aot_get_current_stream(\n"
+            "      torch::stable::accelerator::getCurrentDeviceIndex());",
+            kernel_cpp,
         )
 
     def test_fast_path_scales_scratch_by_num_ctas(self) -> None:

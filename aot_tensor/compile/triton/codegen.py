@@ -76,10 +76,9 @@ extern const void* volatile {sym}_ptr;
 }}"""
 
 _LOADER_TMPL = """
-CUfunction load_{kernel_name}(void)
+CUfunction load_{kernel_name}(int32_t idx)
 {{
   thread_local std::unordered_map<int32_t, CUfunction> cache;
-  auto idx = torch::stable::accelerator::getCurrentDeviceIndex();
   auto res = cache.find(idx);
   if (res != cache.end()) {{
     return res->second;
@@ -122,9 +121,10 @@ CUfunction load_{kernel_name}(void)
 _LAUNCHER_FAST_TMPL = """
 void {kernel_name}(
     {params}) {{
-  CUfunction func = load_{kernel_name}();
+  const auto device_idx = torch::stable::accelerator::getCurrentDeviceIndex();
+  CUfunction func = load_{kernel_name}(device_idx);
   CUstream stream =
-      grid.stream ? grid.stream : triton_aot_get_current_stream();
+      grid.stream ? grid.stream : triton_aot_get_current_stream(device_idx);
   {scratch_declarations}
   uint32_t grid_arr[3] = {{
       (uint32_t)grid.x, (uint32_t)grid.y, (uint32_t)grid.z}};
@@ -138,9 +138,10 @@ void {kernel_name}(
 _LAUNCHER_LEGACY_TMPL = """
 void {kernel_name}(
     {params}) {{
-  CUfunction func = load_{kernel_name}();
+  const auto device_idx = torch::stable::accelerator::getCurrentDeviceIndex();
+  CUfunction func = load_{kernel_name}(device_idx);
   cudaStream_t stream =
-      grid.stream ? grid.stream : triton_aot_get_current_stream();
+      grid.stream ? grid.stream : triton_aot_get_current_stream(device_idx);
   {scratch_declarations}
   void *args[] = {{
       {args_str}
@@ -469,7 +470,9 @@ def gen_launcher(
         # emits the local CUdeviceptr vars we forward by value to the call
         # below. (scratch_args is the legacy-fallback void*[] form and is
         # unused on this path.)
-        scratch_declarations, _ = get_scratch_parameters(kernel)
+        scratch_declarations, _ = get_scratch_parameters(
+            kernel, device_index_expr="device_idx"
+        )
 
         # Build the args struct initializer: { (CUdeviceptr)ptr_arg, scalar_arg, ... }
         struct_fields = []
@@ -518,7 +521,9 @@ def gen_launcher(
     params = gen_launcher_params(descriptors, spec.signature, indent=_CONT)
     args = gen_launch_args(func, spec)
 
-    scratch_declarations, scratch_args = get_scratch_parameters(kernel)
+    scratch_declarations, scratch_args = get_scratch_parameters(
+        kernel, device_index_expr="device_idx"
+    )
     args.extend(scratch_args)
 
     # compat.py joins these at its own indent;
