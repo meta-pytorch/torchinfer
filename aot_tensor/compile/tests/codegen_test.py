@@ -3,6 +3,7 @@
 # pyre-ignore-all-errors[2]: triton func without type
 
 import dataclasses
+import itertools
 import re
 import types
 import unittest
@@ -12,7 +13,9 @@ from unittest.mock import MagicMock, patch
 # @manual=//triton:triton
 import triton
 import triton.language as tl
+from aot_tensor.compile.stable_types import SCALAR_TYPES
 from aot_tensor.compile.tests.mocks import MockAutotuner
+from aot_tensor.compile.triton import codegen as codegen_mod
 from aot_tensor.compile.triton.arg_descriptor import (
     ArgDescriptor,
     build_arg_descriptors,
@@ -24,13 +27,16 @@ from aot_tensor.compile.triton.codegen import (
     _as_cpp_string_literals,
     _CONT,
     _INDENT,
+    dtype_local,
     gen_cpp_op_params,
+    gen_dtype_reads,
     gen_failure_msg,
     gen_guarded_calls,
     gen_kernel_name,
     gen_launcher,
     gen_launcher_call_args,
     gen_launcher_params,
+    gen_selector,
     gen_selector_params,
     gen_selector_proto,
     gen_torch_op_params,
@@ -40,10 +46,12 @@ from aot_tensor.compile.triton.codegen import (
     generate_header_content,
     generate_kernel_cpp_content,
     generate_torch_op_content,
+    Guard,
     is_non_empty_mapping_of_type,
     spec_guards,
     validate_unique_kernel_names,
 )
+from aot_tensor.compile.triton.compat import hip_option_default
 from aot_tensor.compile.triton.spec_processing import AutotuneAttrs, KernelSpec, OpsUnit
 from aot_tensor.constants import DEFAULT_OP_NAMESPACE_PREFIX
 from parameterized import parameterized
@@ -1525,6 +1533,248 @@ class PointerRange32CodegenTest(unittest.TestCase):
         desc_by_idx = {d.index: d for d in build_arg_descriptors(_kernel, unit)}
         with self.assertRaisesRegex(ValueError, f"pointer_range_32 arg {idx}"):
             spec_guards(spec, desc_by_idx, AutotuneAttrs.fields_for("hip"))
+
+
+@triton.jit
+def _sel_kernel(x, out, w, b, M, N, BLOCK: tl.constexpr, HAS_W: tl.constexpr) -> None:
+    pass
+
+
+def _reference_dtype_guards(
+    spec: KernelSpec, desc_by_idx: Dict[int, ArgDescriptor]
+) -> List[Guard]:
+    """The dtype guards as emitted before the selector hoisted its dtype
+    reads: one ``scalar_type()`` call per tensor per spec reached."""
+    guards = []
+    for i, ttype in spec.signature.items():
+        d = desc_by_idx[i]
+        if not isinstance(d, PointerArg):
+            continue
+        guards.append(Guard(f"{d.name}.has_value()"))
+        guards.append(Guard(f"{d.name}.value().scalar_type() == {SCALAR_TYPES[ttype]}"))
+    return guards
+
+
+_DTYPE_READ = re.compile(
+    r"const auto (\w+) = (\w+)\.has_value\(\)\s*\?\s*\2\.value\(\)\.scalar_type\(\)"
+    r"\s*:\s*torch::headeronly::ScalarType::Undefined;"
+)
+
+
+def _py_guard(cond: str) -> str:
+    """One emitted guard condition as a python expression over the
+    evaluation namespace (tensors in ``T``, scalars/constants by name)."""
+    rewrites = (
+        (
+            r"\(\(\(uintptr_t\)(\w+)\.value\(\)\.data_ptr\(\)\) % 16\) == 0",
+            r"T['\1'][1]",
+        ),
+        (r"(\w+)\.value\(\)\.scalar_type\(\)", r"read('\1')"),
+        (r"!(\w+)\.has_value\(\)", r"(T['\1'] is None)"),
+        (r"(\w+)\.has_value\(\)", r"(T['\1'] is not None)"),
+        (r"torch::headeronly::ScalarType::(\w+)", r"'\1'"),
+        (r"!\(", "not ("),
+    )
+    for pattern, repl in rewrites:
+        cond = re.sub(pattern, repl, cond)
+    return cond
+
+
+def _compile_chain(guarded_calls: str) -> List[tuple[Any, str]]:
+    """``[(compiled conjunction of the spec's guards, kernel name), ...]`` in
+    emission order -- the selector's first-match semantics, in python."""
+    chain = []
+    for block in guarded_calls.strip().split("\n\n"):
+        lines = [ln.strip() for ln in block.splitlines()]
+        conds = [ln[len("if (") : -1] for ln in lines if ln.startswith("if (")]
+        name = next(ln for ln in lines if ln.startswith("return "))
+        name = name[len("return ") :].split("(")[0]
+        expr = " and ".join(f"({_py_guard(c)})" for c in conds) or "True"
+        chain.append((compile(expr, name, "eval"), name))
+    return chain
+
+
+class SelectorDtypeReadsTest(unittest.TestCase):
+    """The selector reads each tensor's dtype once, and still picks the
+    variant the per-spec ``scalar_type()`` chain picked, for every input."""
+
+    _DTYPES = {"fp16": "Half", "bf16": "BFloat16", "fp32": "Float"}
+
+    def _unit(self) -> OpsUnit:
+        # 288 variants: a bare_rms_norm-sized chain (180 there) whose specs
+        # differ in every guard family -- dtypes, optional presence,
+        # constants, autotune, alignment marks and i32 narrowing.
+        specs = []
+        for x_t, w_t, has_b, block, has_w, nw, m_div in itertools.product(
+            ("fp16", "bf16", "fp32"),
+            ("fp16", "fp32"),
+            (True, False),
+            (32, 64, 128),
+            (0, 1),
+            (4, 8),
+            (True, False),
+        ):
+            signature = {0: f"*{x_t}", 1: f"*{x_t}", 2: f"*{w_t}", 5: "i32"}
+            signature[4] = "i64" if block == 128 else "i32"
+            constants: Dict[int, Any] = {6: block, 7: has_w}
+            div16 = {0, 1, 2}
+            if has_b:
+                signature[3] = "*bf16"
+                div16.add(3)
+            else:
+                constants[3] = None
+            specs.append(
+                KernelSpec(
+                    signature=dict(sorted(signature.items())),
+                    constants=constants,
+                    divisible_by_16=div16 | ({4} if m_div else set()),
+                    divisible_by_8={4} if m_div else set(),
+                    autotune=AutotuneAttrs(num_warps=nw, num_stages=2),
+                )
+            )
+        return OpsUnit(
+            cc="gfx950",
+            optional={3},
+            pointer_args={0, 1, 2, 3},
+            scalar_dtypes={4: "i64", 5: "i32"},
+            constant_types={6: int, 7: int},
+            specs=specs,
+            autotune_fields=AutotuneAttrs.fields_for("hip"),
+        )
+
+    def _chains(self) -> tuple[str, str, str]:
+        unit = self._unit()
+        fields = unit.autotune_fields
+        descriptors = build_arg_descriptors(_sel_kernel, unit)
+        new = gen_guarded_calls(_sel_kernel, unit, descriptors, fields)
+        with patch.object(codegen_mod, "_dtype_guards", _reference_dtype_guards):
+            old = gen_guarded_calls(_sel_kernel, unit, descriptors, fields)
+        return old, new, gen_dtype_reads(unit, descriptors)
+
+    def _envs(self) -> Any:
+        tensor = [(d, a) for d in self._DTYPES.values() for a in (True, False)]
+        for x, out, w, b, m, block, has_w, nw in itertools.product(
+            tensor,
+            [(d, True) for d in self._DTYPES.values()],
+            [t for t in tensor if t[0] != "BFloat16"],
+            (None, ("BFloat16", True), ("Float", True)),
+            (48, 40, 7, 2**31 + 16),
+            (32, 64, 128, 256),
+            (0, 1),
+            (4, 8),
+        ):
+            yield (
+                {"x": x, "out": out, "w": w, "b": b},
+                {"M": m, "N": 3, "BLOCK": block, "HAS_W": has_w, "num_warps": nw},
+            )
+
+    @staticmethod
+    def _select(chain: List[tuple[Any, str]], ns: Dict[str, Any]) -> str | None:
+        return next((name for code, name in chain if eval(code, {}, ns)), None)
+
+    def test_same_variant_as_per_spec_chain_over_key_grid(self) -> None:
+        old, new, reads = self._chains()
+        self.assertIn("scalar_type()", old)
+        self.assertNotIn("scalar_type()", new)
+        old_chain, new_chain = _compile_chain(old), _compile_chain(new)
+        self.assertEqual([n for _, n in old_chain], [n for _, n in new_chain])
+        self.assertEqual(len(new_chain), 288)
+        hoisted = _DTYPE_READ.findall(reads)
+        self.assertEqual(
+            [(local, arg) for local, arg in hoisted],
+            [(dtype_local(a), a) for a in ("x", "out", "w", "b")],
+        )
+
+        n_envs, n_hits, old_reads = 0, 0, 0
+        for tensors, scalars in self._envs():
+            counter = [0]
+
+            def read(
+                arg: str, T: Dict[str, Any] = tensors, c: List[int] = counter
+            ) -> str:
+                c[0] += 1
+                return T[arg][0]
+
+            base = {
+                "T": tensors,
+                "read": read,
+                "fits_i32": lambda v: -(2**31) <= v < 2**31,
+                "num_stages": 2,
+                "matrix_instr_nonkdim": hip_option_default("matrix_instr_nonkdim"),
+                "waves_per_eu": hip_option_default("waves_per_eu"),
+                "kpack": hip_option_default("kpack"),
+                **scalars,
+            }
+            want = self._select(old_chain, dict(base))
+            old_reads += counter[0]
+            counter[0] = 0
+            ns = dict(base)
+            for local, arg in hoisted:
+                ns[local] = read(arg) if tensors[arg] is not None else "Undefined"
+            got = self._select(new_chain, ns)
+            self.assertEqual(got, want, (tensors, scalars))
+            # One read per present tensor, before any spec is tried.
+            present = sum(t is not None for t in tensors.values())
+            self.assertEqual(counter[0], present)
+            n_envs += 1
+            n_hits += want is not None
+        # The grid reaches both outcomes, and the old chain re-read dtypes.
+        self.assertGreater(n_hits, 400)
+        self.assertLess(n_hits, n_envs)
+        self.assertGreater(old_reads, 20 * n_envs)
+
+    def test_absent_optional_tensor_dtype_is_not_read(self) -> None:
+        _, new, reads = self._chains()
+        self.assertIn("!b.has_value()", new)
+        # The read of b is itself guarded, so a nullopt b is never touched.
+        self.assertIn(
+            "const auto aott_dtype_b = b.has_value()\n    ? b.value().scalar_type()",
+            reads,
+        )
+
+    def test_unguarded_tensor_dtype_is_not_read(self) -> None:
+        unit = self._unit()
+        # Every spec binds b to a constant: no spec compares b's dtype.
+        unit = dataclasses.replace(
+            unit,
+            specs=[s for s in unit.specs if s.constants.get(3, "x") is None],
+        )
+        reads = gen_dtype_reads(unit, build_arg_descriptors(_sel_kernel, unit))
+        self.assertNotIn("aott_dtype_b", reads)
+        self.assertIn("aott_dtype_w", reads)
+
+    def test_selector_local_shadowing_an_argument_raises(self) -> None:
+        @triton.jit
+        def _kernel(x, aott_dtype_x, BLK: tl.constexpr) -> None:  # noqa: N802
+            pass
+
+        unit = OpsUnit(
+            cc=90,
+            optional=set(),
+            pointer_args={0},
+            scalar_dtypes={1: "i32"},
+            constant_types={2: int},
+            specs=[
+                KernelSpec(
+                    signature={0: "*fp32", 1: "i32"},
+                    constants={2: 64},
+                    divisible_by_16=set(),
+                    divisible_by_8=set(),
+                )
+            ],
+        )
+        with self.assertRaisesRegex(RuntimeError, "shadows a kernel argument"):
+            gen_dtype_reads(unit, build_arg_descriptors(_kernel, unit))
+
+    def test_selector_places_reads_inside_the_nonempty_grid_branch(self) -> None:
+        unit = self._unit()
+        descriptors = build_arg_descriptors(_sel_kernel, unit)
+        selector = gen_selector(_sel_kernel, unit, descriptors, unit.autotune_fields)
+        branch = selector.index("if (grid.x * grid.y * grid.z > 0) {")
+        first_read = selector.index("const auto aott_dtype_x")
+        first_spec = selector.index("if (x.has_value())")
+        self.assertLess(branch, first_read)
+        self.assertLess(first_read, first_spec)
 
 
 class IsNonEmptyMappingOfTypeTest(unittest.TestCase):

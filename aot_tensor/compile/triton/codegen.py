@@ -155,7 +155,7 @@ void {func_name}(
     {params}) {{
   auto cc = compute_capability();
   if (grid.x * grid.y * grid.z > 0) {{
-{guarded_calls}
+{dtype_reads}{guarded_calls}
     std::stringstream ss;
     ss << "[TritonAOT] No implementation found for {func_name}"
 {failure_msg};
@@ -612,19 +612,57 @@ class Guard:
         return f"if ({self.cond})"
 
 
+def dtype_local(name: str) -> str:
+    """The selector local holding tensor arg ``name``'s dtype."""
+    return f"aott_dtype_{name}"
+
+
 def _dtype_guards(
     spec: KernelSpec,
     desc_by_idx: dict[int, ArgDescriptor],
 ) -> list[Guard]:
-    """Tensor dtype guards; different specs may bind different dtypes."""
+    """Tensor dtype guards; different specs may bind different dtypes.
+
+    Compares the locals ``gen_dtype_reads`` fills rather than calling
+    ``scalar_type()``, an out-of-line stable-ABI call the compiler cannot
+    hoist out of the guard chain.
+    """
     guards = []
     for i, ttype in spec.signature.items():
         d = desc_by_idx[i]
         if not isinstance(d, PointerArg):
             continue
         guards.append(Guard(f"{d.name}.has_value()"))
-        guards.append(Guard(f"{d.name}.value().scalar_type() == {SCALAR_TYPES[ttype]}"))
+        guards.append(Guard(f"{dtype_local(d.name)} == {SCALAR_TYPES[ttype]}"))
     return guards
+
+
+def gen_dtype_reads(unit: OpsUnit, descriptors: list[ArgDescriptor]) -> str:
+    """Read each dtype-guarded tensor's ``scalar_type()`` once, up front.
+
+    Only tensors some spec's dtype guard compares are read, and only when
+    present, so the set of tensors whose dtype is read is the one the chain
+    could read; a nullopt tensor's sentinel is never compared, because the
+    ``has_value()`` guard ahead of each comparison short-circuits first.
+    """
+    pointer_idx = {d.index for d in descriptors if isinstance(d, PointerArg)}
+    guarded = {i for spec in unit.specs for i in spec.signature} & pointer_idx
+    arg_names = {d.name for d in descriptors}
+    lines = []
+    for d in descriptors:
+        if d.index not in guarded:
+            continue
+        local = dtype_local(d.name)
+        if local in arg_names:
+            raise RuntimeError(
+                f"[AOT-T] selector local {local!r} shadows a kernel argument"
+            )
+        lines.append(
+            f"const auto {local} = {d.name}.has_value()\n"
+            f"{' ' * _CONT}? {d.name}.value().scalar_type()\n"
+            f"{' ' * _CONT}: torch::headeronly::ScalarType::Undefined;\n"
+        )
+    return "".join(lines)
 
 
 def _narrowing_guards(
@@ -858,8 +896,11 @@ def gen_selector(
     return _SELECTOR_TMPL.format(
         func_name=func.__name__,
         params=params,
-        # Both land in _SELECTOR_TMPL's `if` body: one level for the
+        # All three land in _SELECTOR_TMPL's `if` body: one level for the
         # function body, one for the `if`.
+        dtype_reads=textwrap.indent(
+            gen_dtype_reads(unit, descriptors), " " * (2 * _INDENT)
+        ),
         guarded_calls=textwrap.indent(guarded_calls, " " * (2 * _INDENT)),
         failure_msg=textwrap.indent("<< " + failure_msg, " " * (2 * _INDENT)),
     )
