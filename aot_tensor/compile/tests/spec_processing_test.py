@@ -142,7 +142,7 @@ def _make_kernel_spec(**kwargs: Any) -> KernelSpec:
 
 class GenCompileArgTest(unittest.TestCase):
     def test_ops_divisibility_info_reaches_triton(self) -> None:
-        """Test that divisibility info from triton_aot/ops reaches triton IR."""
+        """Test that divisibility info from aot_tensor/fb/ops reaches triton IR."""
         raw_spec: Dict[str, Any] = {
             "signature": [
                 ("*fp32", 16),
