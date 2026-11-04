@@ -171,6 +171,31 @@ class TestGetModuleAndSource(unittest.TestCase):
         self.assertIsNotNone(fn_module)
         self.assertIn("def sample_target", fn_source)
 
+    @parameterized.expand([("aot_tensor.fb.ops",), ("triton_aot.ops",)])
+    def test_extracts_concat_wrapper_from_real_package(self, namespace: str) -> None:
+        module_name = f"{namespace}.triton_concat_2d_jagged_multirow"
+        source = "def wrapper(value: int) -> int:\n    return value + 1\n"
+        archive = io.BytesIO()
+        with PackageExporter(archive) as exporter:
+            parts = namespace.split(".")
+            for count in range(1, len(parts) + 1):
+                exporter.save_source_string(
+                    ".".join(parts[:count]), "", is_package=True
+                )
+            exporter.save_source_string(module_name, source)
+        archive.seek(0)
+        importer = PackageImporter(archive)
+        module = importer.import_module(module_name)
+        wrapper = module.wrapper
+        self.assertTrue(wrapper.__module__.startswith("<torch_package_"))
+
+        fn_module, module_source, fn_source = _get_module_and_source(wrapper, importer)
+
+        self.assertIs(fn_module, module)
+        self.assertEqual(module_source, source)
+        self.assertEqual(ast.dump(ast.parse(fn_source)), ast.dump(ast.parse(source)))
+        self.assertEqual(wrapper(2), 3)
+
     @parameterized.expand(
         [
             ("aot_tensor.fb.ops.triton_layer_norm",),
