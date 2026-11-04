@@ -28,6 +28,7 @@ from aot_tensor.compile.triton.adapter import (
     _ensure_multi_config_autotuner,
     _extract_default_values,
     _inferred_has_perf_advantage,
+    _relax_annotation,
     _resolve_autotune_cache,
     _resolve_call_args,
     _sample_satisfies_annotation,
@@ -38,7 +39,7 @@ from aot_tensor.compile.triton.adapter import (
     TritonAOTOperatorTransform,
     TritonCompileConfig,
 )
-from aot_tensor.compile.triton.spec_processing import AutotuneAttrs
+from aot_tensor.compile.triton.spec_processing import AutotuneAttrs, KernelSpec, OpsUnit
 from aot_tensor.constants import DEFAULT_OP_NAMESPACE_PREFIX
 from aot_tensor.transform.wrapper_codegen_utils import strip_jit_unused_decorator
 from aot_tensor.types import AnnotationHint, TritonAOT
@@ -438,6 +439,42 @@ class SampleSatisfiesAnnotationTest(unittest.TestCase):
         self.assertTrue(_sample_satisfies_annotation(t, "*fp32"))
 
 
+class RelaxAnnotationTest(unittest.TestCase):
+    """Tests for _relax_annotation: loosen only the part the sample breaks."""
+
+    @parameterized.expand(
+        [
+            (
+                "satisfied_kept",
+                32,
+                AnnotationHint("i32", 16),
+                AnnotationHint("i32", 16),
+            ),
+            ("div16_broken_drops_hint", 37, AnnotationHint("i32", 16), "i32"),
+            ("equal_to_1_broken_drops_hint", 2, AnnotationHint("i32", 1), "i32"),
+            (
+                "overflow_divisible_widens_keeps_hint",
+                3_000_000_000,
+                AnnotationHint("i32", 16),
+                AnnotationHint("i64", 16),
+            ),
+            (
+                "overflow_and_div16_broken",
+                3_000_000_001,
+                AnnotationHint("i32", 16),
+                "i64",
+            ),
+            ("bare_i32_overflow_widens", 3_000_000_000, "i32", "i64"),
+        ]
+    )
+    def test_relax_int(self, _name: str, sample: int, ann: Any, expected: Any) -> None:
+        self.assertEqual(_relax_annotation(sample, ann), expected)
+
+    def test_unaligned_tensor_drops_alignment(self) -> None:
+        t = torch.zeros(17, dtype=torch.float32)[1:]
+        self.assertEqual(_relax_annotation(t, AnnotationHint("*fp32", 16)), "*fp32")
+
+
 class InferredHasPerfAdvantageTest(unittest.TestCase):
     """Tests for _inferred_has_perf_advantage."""
 
@@ -506,8 +543,10 @@ class CollectTritonSpecTest(_ResetStateTest):
             ("bare_i64_matches_inference", {"N": "i64"}, 10, 1),
             ("bare_pointer_drops_alignment", {"X": "*i64"}, 10, 2),
             ("tuple_i32_div16_satisfied", {"N": AnnotationHint("i32", 16)}, 16, 1),
+            # The relaxed spec ("i64") equals the inferred one and dedups.
             ("bare_i32_overflow_conflict", {"N": "i32"}, 3_000_000_000, 2),
-            ("tuple_i32_div16_not_divisible", {"N": AnnotationHint("i32", 16)}, 17, 2),
+            # Annotated, relaxed ("i32"), inferred ("i64").
+            ("tuple_i32_div16_not_divisible", {"N": AnnotationHint("i32", 16)}, 17, 3),
         ]
     )
     def test_collect_spec_annotation_variant(
@@ -517,7 +556,8 @@ class CollectTritonSpecTest(_ResetStateTest):
         n_value: int,
         expected_count: int,
     ) -> None:
-        """Annotation-as-variant: no conflict → 1 spec, conflict → 2 specs."""
+        """Annotation-as-variant: no conflict → 1 spec; a conflict adds the
+        relaxed and inferred specs unless they coincide."""
         fake_kernel = self._make_fake_kernel_xn()
         if "X" in annotations:
             x = torch.randn(4, 4).to(torch.int64)
@@ -558,6 +598,91 @@ class CollectTritonSpecTest(_ResetStateTest):
         second = get_aott_compile_state().dsl_state["triton"].dsl
         self.assertIsInstance(first, TritonAdapter)
         self.assertIs(first, second)
+
+
+def _linear_like_kernel(X, W, M, N, stride_xm, stride_xk):
+    pass
+
+
+# A plain function standing in for the Triton kernel _collect_triton_spec takes.
+_LINEAR_KERNEL: Any = _linear_like_kernel
+_LINEAR_KERNEL.arg_names = ["X", "W", "M", "N", "stride_xm", "stride_xk"]
+
+# linear_residual_add's annotations. M is the jagged token count, so samples
+# need not be 16-aligned.
+_LINEAR_ANNOTATIONS: Dict[str, Any] = {
+    "M": AnnotationHint("i32", 16),
+    "N": AnnotationHint("i32", 16),
+    "stride_xm": AnnotationHint("i32", 16),
+    "stride_xk": AnnotationHint("i32", 1),
+}
+_P = ("*fp32", 16)
+_ANNOTATED: List[Any] = [_P, _P, ("i32", 16), ("i32", 16), ("i32", 16), ("i32", 1)]
+_RELAXED_M: List[Any] = [_P, _P, "i32", ("i32", 16), ("i32", 16), ("i32", 1)]
+_RELAXED_N: List[Any] = [_P, _P, ("i32", 16), "i32", ("i32", 16), ("i32", 1)]
+_RELAXED_MN: List[Any] = [_P, _P, "i32", "i32", ("i32", 16), ("i32", 1)]
+_INFERRED: List[Any] = [_P, _P, "i64", "i64", "i64", "i64"]
+
+
+class PerArgRelaxationTest(_ResetStateTest):
+    """A sample that breaks some annotations adds a spec relaxing only those,
+    dispatched after the annotated spec and before the inferred one."""
+
+    @staticmethod
+    def _collect(m: int, n: int) -> None:
+        x = torch.empty(m, 64)
+        w = torch.empty(n, 64)
+        _collect_triton_spec(
+            _LINEAR_KERNEL,
+            _LINEAR_ANNOTATIONS,
+            x,
+            w,
+            m,
+            n,
+            x.stride(0),
+            x.stride(1),
+        )
+
+    @staticmethod
+    def _signatures() -> List[List[Any]]:
+        specs = get_kernel_specs(TritonAdapter.name)[_LINEAR_KERNEL].specs
+        return [s["signature"] for s in specs]
+
+    @staticmethod
+    def _dispatch_order() -> List[KernelSpec]:
+        specs = get_kernel_specs(TritonAdapter.name)[_LINEAR_KERNEL].specs
+        return OpsUnit.from_raw_specs(specs, GPUTarget("cuda", 80, 32)).specs
+
+    @parameterized.expand(
+        [
+            # M=37 breaks only M's hint: N, stride_xm stay divisible and
+            # stride_xk stays folded to 1 in the relaxed spec.
+            ("unaligned_m_relaxes_only_m", 37, [_ANNOTATED, _RELAXED_M, _INFERRED]),
+            # Nothing to relax and no fallback: a later unaligned M has no spec
+            # to dispatch to, the gap per-arg relaxation does not close.
+            ("aligned_m_collects_annotated_only", 64, [_ANNOTATED]),
+        ]
+    )
+    def test_collected_specs(
+        self, _name: str, m: int, expected: List[List[Any]]
+    ) -> None:
+        self._collect(m, 64)
+        self.assertEqual(self._signatures(), expected)
+
+    def test_relaxed_specs_dispatch_before_inferred_across_calls(self) -> None:
+        """Specs relaxed by later calls still dispatch ahead of the inferred
+        spec an earlier call added, narrowest first."""
+        self._collect(37, 64)
+        self._collect(37, 40)
+        self._collect(64, 40)
+        self.assertEqual(
+            self._signatures(),
+            [_ANNOTATED, _RELAXED_M, _INFERRED, _RELAXED_MN, _RELAXED_N],
+        )
+        self.assertEqual(
+            [s.divisible_by_16 for s in self._dispatch_order()],
+            [{0, 1, 2, 3, 4}, {0, 1, 3, 4}, {0, 1, 2, 4}, {0, 1, 4}, {0, 1}],
+        )
 
 
 class ResolveCallArgsTest(unittest.TestCase):

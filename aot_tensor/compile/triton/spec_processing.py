@@ -360,10 +360,11 @@ class OpsUnit:
         1. Convert raw specs to KernelSpecs
         2. Detect optional tensor args (cross-spec + 3-tuple)
         3. Validate consistency across converted specs
-        4. Expand ``tt.pointer_range=32`` variants (AMD only)
-        5. Apply autotuning (if tuned_func provided)
-        6. Deduplicate specs
-        7. Compute shared invariants (pointer_args, scalar_dtypes, constant_types)
+        4. Order specs narrowest first (``_order_by_specificity``)
+        5. Expand ``tt.pointer_range=32`` variants (AMD only)
+        6. Apply autotuning (if tuned_func provided)
+        7. Deduplicate specs
+        8. Compute shared invariants (pointer_args, scalar_dtypes, constant_types)
         """
         # Validate raw specs upfront, before any rewriting.
         num_params = _check_uniform_signature_length(base_specs)
@@ -372,6 +373,7 @@ class OpsUnit:
 
         _validate_converted_specs(specs, optional, num_params)
 
+        specs = _order_by_specificity(specs)
         specs = _expand_pointer_range_32_variants(specs)
 
         autotune_fields = AutotuneAttrs.fields_for(gpu_target.backend)
@@ -811,6 +813,27 @@ def _convert_raw_specs(
         specs.append(spec)
 
     return specs, three_tuple_optional
+
+
+def _order_by_specificity(specs: list[KernelSpec]) -> list[KernelSpec]:
+    """Put narrower specs first.  Dispatch takes the first spec whose guards
+    pass, and the inferred spec (every int a bare ``i64``) matches anything,
+    so a spec behind it is never used.
+
+    Weight per int arg: hinted ``i32`` or constant 0, hinted ``i64`` 1, bare
+    ``i32`` 2, bare ``i64`` 3 (a missing hint costs more than ``i64``).
+    Stable, so ties keep collection order.
+    """
+
+    def int_weight(spec: KernelSpec) -> int:
+        hinted = spec.divisible_by_16 | spec.divisible_by_8
+        return sum(
+            _INT_WIDTH_RANK[dtype] + (0 if i in hinted else 2)
+            for i, dtype in spec.signature.items()
+            if dtype in _INT_WIDTH_RANK
+        )
+
+    return sorted(specs, key=int_weight)
 
 
 def _expand_pointer_range_32_variants(specs: list[KernelSpec]) -> list[KernelSpec]:

@@ -82,8 +82,10 @@ def _collect_triton_spec(
     """Record the specs for one Triton kernel call (invoked by ``collect``).
 
     Always collects the annotated spec (which equals the inferred spec
-    when no annotations are present).  Also collects the inferred spec
-    when it differs and either:
+    when no annotations are present).  When the sample violates some
+    annotations, also collects a relaxed spec that relaxes only those
+    (``_relax_annotation``).  Also collects the inferred spec when it
+    differs and either:
     - annotations conflict with sample (fallback for safety), or
     - inferred has perf hints the annotation lacks (perf variant).
     """
@@ -97,9 +99,13 @@ def _collect_triton_spec(
         inferred_hash = hash_spec(inferred)
         if inferred_hash == annotated_hash:
             return
-        if _annotation_conflicts_with_sample(
-            fn, annotations, *args, **kwargs
-        ) or _inferred_has_perf_advantage(spec, inferred):
+        _, sample_args = _resolve_call_args(fn, *args, **kwargs)
+        relaxed_annotations = _relax_annotations(annotations, sample_args)
+        conflicts = relaxed_annotations != annotations
+        if conflicts:
+            relaxed = infer_spec(fn, relaxed_annotations, *args, **kwargs)
+            add_spec(TRITON, fn, relaxed, hash_spec(relaxed))
+        if conflicts or _inferred_has_perf_advantage(spec, inferred):
             add_spec(TRITON, fn, inferred, inferred_hash)
 
 
@@ -225,28 +231,31 @@ def _sample_satisfies_annotation(sample: Any, ann: Annotation) -> bool:
     return True
 
 
-def _annotation_conflicts_with_sample(
-    fn: KernelInterface[Callable[..., Any]],
-    annotations: Dict[str, Annotation],
-    *args: Any,
-    **kwargs: Any,
-) -> bool:
-    """True if any annotated param's sample value doesn't satisfy the annotation.
+def _relax_annotation(sample: Any, ann: Annotation) -> Annotation:
+    """Loosen ``ann`` just enough for ``sample``: widen ``i32`` to ``i64`` if
+    the value overflows it, and drop the hint if the value breaks it."""
+    if _sample_satisfies_annotation(sample, ann):
+        return ann
+    dtype = ann.dtype if isinstance(ann, AnnotationHint) else ann
+    if isinstance(sample, int) and not _sample_satisfies_int_type(sample, dtype):
+        dtype = "i64"
+    if isinstance(ann, AnnotationHint):
+        widened = AnnotationHint(dtype, ann.hint)
+        if _sample_satisfies_annotation(sample, widened):
+            return widened
+    return dtype
 
-    Used by ``_collect_triton_spec`` to decide whether to generate an inferred
-    fallback spec.  When the sample satisfies all annotations, only the
-    annotated spec is needed (the user's constraints hold for this input).
-    """
-    _, sample_args = _resolve_call_args(fn, *args, **kwargs)
 
+def _relax_annotations(
+    annotations: Dict[str, Annotation], sample_args: Dict[str, Any]
+) -> Dict[str, Annotation]:
+    """Relax each annotation the sample breaks; returns ``annotations``
+    unchanged when it breaks none."""
+    relaxed: Dict[str, Annotation] = {}
     for param_name, ann in annotations.items():
         sample = sample_args.get(param_name)
-        if sample is None:
-            continue
-        if not _sample_satisfies_annotation(sample, ann):
-            return True
-
-    return False
+        relaxed[param_name] = ann if sample is None else _relax_annotation(sample, ann)
+    return relaxed
 
 
 def infer_spec(  # noqa: C901

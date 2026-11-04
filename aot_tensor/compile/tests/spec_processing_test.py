@@ -559,6 +559,68 @@ class ConvertSpecsFP8Test(unittest.TestCase):
         self.assertEqual(unit.specs[0].signature[0], expected_dtype)
 
 
+class OrderBySpecificityTest(unittest.TestCase):
+    """OpsUnit.from_raw_specs() dispatches specs with fewer unhinted int args
+    first, so a spec collected after the inferred one is still reachable."""
+
+    _P: tuple[str, int] = ("*fp32", 16)
+
+    @parameterized.expand(
+        [
+            # name, signatures in collection order, in expected dispatch order
+            (
+                "inferred_collected_first_dispatches_last",
+                [
+                    [_P, "i64", "i64"],
+                    [_P, "i32", ("i32", 16)],
+                    [_P, ("i32", 16), ("i32", 16)],
+                ],
+                [
+                    [_P, ("i32", 16), ("i32", 16)],
+                    [_P, "i32", ("i32", 16)],
+                    [_P, "i64", "i64"],
+                ],
+            ),
+            (
+                "bare_i32_before_bare_i64",
+                [[_P, "i64"], [_P, "i32"]],
+                [[_P, "i32"], [_P, "i64"]],
+            ),
+            (
+                "hinted_i32_before_hinted_i64",
+                [[_P, ("i64", 16)], [_P, ("i32", 16)]],
+                [[_P, ("i32", 16)], [_P, ("i64", 16)]],
+            ),
+            (
+                "hinted_i64_before_bare_i32",
+                [[_P, "i32"], [_P, ("i64", 16)]],
+                [[_P, ("i64", 16)], [_P, "i32"]],
+            ),
+            (
+                "folded_constant_counts_as_hinted",
+                [[_P, "i32"], [_P, ("i32", 1)]],
+                [[_P, ("i32", 1)], [_P, "i32"]],
+            ),
+            (
+                "pointer_alignment_does_not_weigh",
+                [["*fp32", ("i32", 16)], [_P, ("i32", 16)]],
+                [["*fp32", ("i32", 16)], [_P, ("i32", 16)]],
+            ),
+        ]
+    )
+    def test_order(
+        self, _name: str, collected: List[List[Any]], expected: List[List[Any]]
+    ) -> None:
+        target = GPUTarget("cuda", 80, 32)
+        unit = OpsUnit.from_raw_specs([{"signature": s} for s in collected], target)
+        # One spec per unit, so nothing reorders the expected list.
+        expected_specs = [
+            OpsUnit.from_raw_specs([{"signature": s}], target).specs[0]
+            for s in expected
+        ]
+        self.assertEqual(unit.specs, expected_specs)
+
+
 class ConvertSpecsPointerRange32Test(unittest.TestCase):
     """Tests for OpsUnit.from_raw_specs() ``pointer_range_32`` variants."""
 
