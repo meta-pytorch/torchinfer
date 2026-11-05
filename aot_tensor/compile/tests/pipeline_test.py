@@ -39,7 +39,11 @@ class SpecGenTest(unittest.TestCase):
         )
 
     def _run_spec_gen(
-        self, metadata_shared: int, compile_options: dict[str, bool] | None = None
+        self,
+        metadata_shared: int,
+        compile_options: dict[str, bool] | None = None,
+        *,
+        maxnreg: int = 0,
     ) -> tuple[str, int, MagicMock]:
         kernel = MagicMock()
         kernel.metadata.name = "_fake_kernel"
@@ -82,7 +86,9 @@ class SpecGenTest(unittest.TestCase):
         ):
             code, shared = spec_gen(
                 install_dir="/tmp/spec_gen_test",
-                spec=self._make_spec(),
+                spec=dataclasses.replace(
+                    self._make_spec(), autotune=AutotuneAttrs(maxnreg=maxnreg)
+                ),
                 module="fake.module",
                 name="_fake_kernel",
                 gpu_target=GPUTarget("cuda", 90, 32),
@@ -111,6 +117,16 @@ class SpecGenTest(unittest.TestCase):
         self.assertEqual(
             options_compile.call_args.kwargs["options"], {**plain, **options}
         )
+
+    @parameterized.expand([("unset", 0, None), ("limited", 96, 96)])
+    def test_register_budget_reaches_compiler(
+        self, _name: str, budget: int, expected: int | None
+    ) -> None:
+        *_, compiled = self._run_spec_gen(0, maxnreg=budget)
+        options = compiled.call_args.kwargs["options"]
+        self.assertEqual(options.get("maxnreg"), expected)
+        if expected is None:
+            self.assertNotIn("maxnreg", options)
 
     @parameterized.expand([(f.name,) for f in dataclasses.fields(AutotuneAttrs)])
     def test_marker_cannot_set_an_autotune_field(self, field: str) -> None:

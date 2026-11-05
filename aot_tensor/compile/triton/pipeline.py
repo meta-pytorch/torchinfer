@@ -130,6 +130,8 @@ def spec_gen(
 
     compile_arg = gen_compile_arg(spec, func)
     options = {f.name: getattr(spec.autotune, f.name) for f in autotune_fields}
+    if options.get("maxnreg") == 0:
+        del options["maxnreg"]
     # The kernel's TritonAOT compile options, which its JIT launches used too.
     # TritonAOT allows none of the autotune fields, and the backend drops the
     # options it does not define.

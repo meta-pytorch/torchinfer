@@ -128,8 +128,9 @@ class AutotuneAttrs:
     AMD_ONLY_FIELDS: ClassVar[frozenset[str]] = frozenset(
         {"matrix_instr_nonkdim", "waves_per_eu", "kpack"}
     )
-    # Add ``maxnreg`` etc. when a production kernel autotunes over them.
-    NVIDIA_ONLY_FIELDS: ClassVar[frozenset[str]] = frozenset({"num_ctas", "auto_tma"})
+    NVIDIA_ONLY_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        {"num_ctas", "auto_tma", "maxnreg"}
+    )
 
     # --- Actual autotune fields ---------------------------------------------
     # ``cubin_short`` metadata = short prefix used in cubin file names
@@ -153,6 +154,8 @@ class AutotuneAttrs:
     # Omitted from the cubin name when False (see gen_kernel_name) so default
     # kernels are not renamed.
     auto_tma: bool = field(default=False, metadata={"cubin_short": "atma"})
+    # Zero represents Triton's unset (None) budget in the integer selector ABI.
+    maxnreg: int = field(default=0, metadata={"cubin_short": "reg"})
 
     @classmethod
     @functools.cache
@@ -262,6 +265,9 @@ class KernelSpec:
     divisible_by_8: set[int]
     autotune: AutotuneAttrs = dataclasses.field(default_factory=AutotuneAttrs)
     pointer_range_32: set[int] = dataclasses.field(default_factory=set)
+    # Optional provenance (e.g. a kernel-foundry Template rung name),
+    # carried from collection into the generated selector as a comment.
+    label: str | None = None
 
 
 @dataclass
@@ -786,11 +792,13 @@ def _convert_raw_specs(
         )
         three_tuple_optional |= constraints.optional_args
 
+        raw_label = raw_spec.get("label")
         spec = KernelSpec(
             signature=signature,
             constants=constants,
             divisible_by_16=constraints.divisible_by_16,
             divisible_by_8=constraints.divisible_by_8,
+            label=raw_label if isinstance(raw_label, str) else None,
         )
 
         if constraints.has_fp8:
@@ -855,7 +863,18 @@ def _expand_pointer_range_32_variants(specs: list[KernelSpec]) -> list[KernelSpe
     groups: dict[str, tuple[KernelSpec, list[set[int]]]] = {}
     for spec in specs:
         base = dataclasses.replace(spec, pointer_range_32=set())
-        _, tag_sets = groups.setdefault(hash_spec(dataclasses.asdict(base)), (base, []))
+        # Group identity EXCLUDES the provenance label (mirrors
+        # ``_dedup_specs``): differently-labeled specs sharing a base must
+        # form ONE group. Label-split groups each emit their own base, and
+        # downstream ``_dedup_specs`` keeps only the FIRST — leaving that
+        # untagged base (which matches every call) AHEAD of the later
+        # groups' tagged variants in the first-match-wins guard order, so
+        # those pointer-range-32 variants are silently shadowed and never
+        # dispatch. The first-seen base keeps its label (first label wins,
+        # as in collection).
+        key_dict = dataclasses.asdict(base)
+        key_dict.pop("label", None)
+        _, tag_sets = groups.setdefault(hash_spec(key_dict), (base, []))
         tagged = spec.pointer_range_32
         if tagged and tagged not in tag_sets:
             tag_sets.append(tagged)
@@ -922,7 +941,12 @@ def _dedup_specs(specs: list[KernelSpec]) -> list[KernelSpec]:
     duplicated_specs: list[KernelSpec] = []
     hash_spec_ids: set[str] = set()
     for spec in specs:
-        id = hash_spec(dataclasses.asdict(spec))
+        # Identity EXCLUDES the provenance label: two differently-labeled
+        # base specs whose expanded cells coincide must still collapse
+        # (duplicate kernel names would fail validate_unique_kernel_names).
+        as_dict = dataclasses.asdict(spec)
+        as_dict.pop("label", None)
+        id = hash_spec(as_dict)
         if id in hash_spec_ids:
             duplicated_specs.append(spec)
         else:

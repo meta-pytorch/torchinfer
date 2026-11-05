@@ -30,6 +30,7 @@ from aot_tensor.compile.triton.spec_processing import (
     _compute_constexpr_keys,
     _dedup_specs,
     _detect_optional_args,
+    _expand_pointer_range_32_variants,
     _max_dynamic_shared_per_block_optin,
     _validate_converted_specs,
     _wider_type,
@@ -894,6 +895,7 @@ class AutotuneAttrsTest(unittest.TestCase):
                 "kpack",
                 "num_ctas",
                 "auto_tma",
+                "maxnreg",
             ],
         )
 
@@ -1226,6 +1228,16 @@ class AutotuneAttrsFromCfgTest(unittest.TestCase):
         cfg = triton.Config(cfg_kwargs, **cfg_attr_kwargs)
         attrs = AutotuneAttrs.from_cfg(cfg, AutotuneAttrs.fields_for(backend))
         self.assertEqual(attrs.num_ctas, expected_num_ctas)
+
+    @parameterized.expand(
+        [("unset", None, "cuda", 0), ("cuda", 96, "cuda", 96), ("hip", 96, "hip", 0)]
+    )
+    def test_maxnreg_from_config(
+        self, _name: str, budget: int | None, backend: str, expected: int
+    ) -> None:
+        cfg = triton.Config({"BLOCK_M": 64}, maxnreg=budget)
+        attrs = AutotuneAttrs.from_cfg(cfg, AutotuneAttrs.fields_for(backend))
+        self.assertEqual(attrs.maxnreg, expected)
 
 
 class AutotuneSpecsTest(unittest.TestCase):
@@ -1813,3 +1825,30 @@ class OpsUnitDropOversizeSpecsTest(unittest.TestCase):
         narrowed, codes = unit.drop_oversize_specs([("c", 999_999_999)])
         self.assertEqual(len(narrowed.specs), 1)
         self.assertEqual(codes, ["c"])
+
+
+class ExpandPointerRange32LabelIdentityTest(unittest.TestCase):
+    def test_labels_are_provenance_not_group_identity(self) -> None:
+        # Two specs sharing a semantic base but carrying different
+        # provenance labels (and different tagged sets) must form ONE
+        # group. A label-split grouping emits the base once per label;
+        # downstream `_dedup_specs` keeps only the first, which then sits
+        # AHEAD of the later group's tagged variants in the
+        # first-match-wins guard order — silently shadowing them (the
+        # exact-order assertion below is the no-shadowing pin). Mirrors
+        # `_dedup_specs`, which also excludes the label from identity.
+        a = _make_kernel_spec(
+            signature={0: "*fp32", 1: "*fp32"},
+            pointer_range_32={0},
+            label="lane a",
+        )
+        b = _make_kernel_spec(
+            signature={0: "*fp32", 1: "*fp32"},
+            pointer_range_32={0, 1},
+            label="lane b",
+        )
+        out = _expand_pointer_range_32_variants([a, b])
+        # One group: largest tagged set, smaller set, then ONE base.
+        self.assertEqual([s.pointer_range_32 for s in out], [{0, 1}, {0}, set()])
+        # The first-seen label rides the whole group (first label wins).
+        self.assertEqual([s.label for s in out], ["lane a"] * 3)

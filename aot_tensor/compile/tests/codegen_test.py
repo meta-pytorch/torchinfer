@@ -330,7 +330,7 @@ class CompilerTest(unittest.TestCase):
             "def _addmm_fwd_meta(",
             "N: int",
             "K: int",
-            "# Returns: (BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M, num_warps, num_stages, num_ctas, auto_tma)",
+            "# Returns: (BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M, num_warps, num_stages, num_ctas, auto_tma, maxnreg)",
             "if N == 256 and K == 1024:",
             "if N == 128 and K == 256:",
         ]
@@ -346,14 +346,14 @@ class CompilerTest(unittest.TestCase):
                 True,
                 "return ",
                 "cuda",
-                "# Returns: (num_warps, num_stages, num_ctas, auto_tma)",
+                "# Returns: (num_warps, num_stages, num_ctas, auto_tma, maxnreg)",
             ),
             (
                 "cuda_no_fallback",
                 False,
                 "raise RuntimeError",
                 "cuda",
-                "# Returns: (num_warps, num_stages, num_ctas, auto_tma)",
+                "# Returns: (num_warps, num_stages, num_ctas, auto_tma, maxnreg)",
             ),
             (
                 "hip_with_fallback",
@@ -910,6 +910,7 @@ class GenKernelNameTest(unittest.TestCase):
         name = gen_kernel_name(_addmm_fwd, spec, cc, AutotuneAttrs.fields_for("cuda"))
         for s in expected_substrings:
             self.assertIn(s, name)
+        self.assertNotIn("_reg0_", name)
 
     def test_suffix_marks_use_original_arg_indices_with_folded_args(self) -> None:
         """The divisibility suffix must track ORIGINAL arg indices (the
@@ -973,10 +974,11 @@ class GenKernelNameTest(unittest.TestCase):
                 waves_per_eu=2,
                 kpack=2,
                 num_ctas=2,
+                maxnreg=96,
             ),
         )
         cases = {
-            "cuda": ["w8", "s4", "cta2"],
+            "cuda": ["w8", "s4", "cta2", "reg96"],
             "hip": ["w8", "s4", "matrix16", "wave2", "kpack2"],
         }
         for backend, expected in cases.items():
@@ -992,6 +994,7 @@ class GenKernelNameTest(unittest.TestCase):
                         self.assertNotIn(amd_only, name)
                 else:
                     self.assertNotIn("cta", name)
+                    self.assertNotIn("reg", name)
 
 
 class AsCppStringLiteralsTest(unittest.TestCase):

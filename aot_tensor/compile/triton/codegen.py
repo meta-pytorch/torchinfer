@@ -278,9 +278,10 @@ def gen_kernel_name(
     autotune_configs = [
         f"{f.metadata['cubin_short']}{getattr(spec.autotune, f.name)}"
         for f in autotune_fields
-        # Omit default-off auto_tma so enabling auto-TMA (beta) doesn't rename
-        # every existing kernel; only auto_tma=True variants get a distinct name.
-        if not (f.name == "auto_tma" and not getattr(spec.autotune, f.name))
+        # Unset optional backend controls retain the original kernel name.
+        if not (
+            f.name in {"auto_tma", "maxnreg"} and not getattr(spec.autotune, f.name)
+        )
     ]
     # See kernel_suffix in triton/compiler/code_generator.py.
     # ``spec.signature`` is keyed by ORIGINAL arg indices (constants
@@ -813,6 +814,10 @@ def gen_guarded_calls(
             descriptors, spec.signature, indent=_CALL_ARG_INDENT
         )
         lines = [g.render() for g in spec_guards(spec, desc_by_idx, autotune_fields)]
+        if spec.label is not None:
+            # Provenance comment (e.g. the kernel-foundry Template rung this
+            # spec was declared as) — inspection aid, zero behavior.
+            lines.insert(0, f"{' ' * _INDENT}// spec: {spec.label}")
         # Built as a list so a spec with no guards emits a bare return rather
         # than a leading blank line.
         lines.append(

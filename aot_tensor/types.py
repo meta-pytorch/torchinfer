@@ -196,11 +196,17 @@ class TritonAOT(
         fn: KernelInterface[Callable[..., Any]],
         annotations: Dict[str, AnnotationInput],
         compile_options: Optional[Mapping[str, Any]] = None,
+        label: Optional[str] = None,
     ) -> None:
         self.fn: KernelInterface[Callable[..., Any]] = fn
         self.annotations: Dict[str, Annotation] = {
             k: _normalize_annotation(v) for k, v in annotations.items()
         }
+        # Optional human-readable provenance for the spec(s) this marker
+        # collects (e.g. a kernel-foundry Template rung name); emitted as a
+        # ``// spec:`` comment above the selector branch. Never part of the
+        # spec identity/dedup hash.
+        self.label: Optional[str] = label
         # A dict: ``run`` branches on it, and dynamo takes an empty
         # MappingProxyType for true.
         self._compile_options: Dict[str, Any] = dict(compile_options or {})

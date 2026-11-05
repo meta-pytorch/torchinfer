@@ -76,10 +76,18 @@ logger: logging.Logger = logging.getLogger(__name__)
 def _collect_triton_spec(
     fn: KernelInterface[Callable[..., Any]],
     annotations: Dict[str, Annotation],
-    *args: Any,
-    **kwargs: Any,
+    launch_args: Tuple[Any, ...],
+    launch_kwargs: Dict[str, Any],
+    *,
+    label: Optional[str] = None,
 ) -> None:
     """Record the specs for one Triton kernel call (invoked by ``collect``).
+
+    The launch arguments travel as CONTAINERS, not splatted: collection
+    metadata (``label``) must stay outside the kernel-argument namespace —
+    a kernel is free to declare its own ``label`` parameter, and splatting
+    ``**launch_kwargs`` beside a ``label=`` keyword made that a
+    TypeError.
 
     Always collects the annotated spec, with unannotated ints specialized on
     the sample like the Triton JIT (``_jit_int_spec``).  When the sample
@@ -92,23 +100,41 @@ def _collect_triton_spec(
     - inferred has perf hints the annotation lacks (perf variant).
     """
     _ensure_multi_config_autotuner(fn)
-    plain = infer_spec(fn, annotations, args, kwargs)
-    spec = infer_spec(fn, annotations, args, kwargs, specialize_ints=True)
-    add_spec(TRITON, fn, spec, hash_spec(spec))
+    plain = infer_spec(fn, annotations, launch_args, launch_kwargs)
+    plain_hash = hash_spec(plain)
+    spec = infer_spec(fn, annotations, launch_args, launch_kwargs, specialize_ints=True)
+    annotated_hash = hash_spec(spec)
+    if label is not None:
+        # AFTER hashing: provenance only, never spec identity (two markers
+        # producing one spec dedupe regardless of labels; first label wins).
+        spec["label"] = label
+    add_spec(TRITON, fn, spec, annotated_hash)
 
-    inferred = infer_spec(fn, {}, args, kwargs)
-    if inferred == spec:
+    inferred = infer_spec(fn, {}, launch_args, launch_kwargs)
+    inferred_hash = hash_spec(inferred)
+    # Hash comparisons throughout: ``spec`` carries the provenance label
+    # after this point, so dict equality would always differ.
+    if inferred_hash == annotated_hash:
         return
-    _, sample_args = _resolve_call_args(fn, *args, **kwargs)
+    _, sample_args = _resolve_call_args(fn, *launch_args, **launch_kwargs)
     relaxed_annotations = _relax_annotations(annotations, sample_args)
     conflicts = relaxed_annotations != annotations
     if conflicts:
         relaxed = infer_spec(
-            fn, relaxed_annotations, args, kwargs, specialize_ints=True
+            fn, relaxed_annotations, launch_args, launch_kwargs, specialize_ints=True
         )
-        add_spec(TRITON, fn, relaxed, hash_spec(relaxed))
-    if conflicts or spec != plain or _inferred_has_perf_advantage(spec, inferred):
-        add_spec(TRITON, fn, inferred, hash_spec(inferred))
+        relaxed_hash = hash_spec(relaxed)
+        if label is not None:
+            relaxed["label"] = f"{label} (relaxed)"
+        add_spec(TRITON, fn, relaxed, relaxed_hash)
+    if (
+        conflicts
+        or annotated_hash != plain_hash
+        or _inferred_has_perf_advantage(spec, inferred)
+    ):
+        if label is not None:
+            inferred["label"] = f"{label} (inferred)"
+        add_spec(TRITON, fn, inferred, inferred_hash)
 
 
 # =====================================================================
@@ -148,8 +174,8 @@ def _unwrap_triton_fn(
 
 
 def _inferred_has_perf_advantage(
-    annotated_spec: Dict[str, List[Any]],
-    inferred_spec: Dict[str, List[Any]],
+    annotated_spec: Dict[str, Any],
+    inferred_spec: Dict[str, Any],
 ) -> bool:
     """True if inferred spec has alignment/divisibility hints the annotated lacks.
 
@@ -282,7 +308,7 @@ def infer_spec(  # noqa: C901
     args: Sequence[Any],
     kwargs: Mapping[str, Any],
     specialize_ints: bool = False,
-) -> Dict[str, List[Any]]:
+) -> Dict[str, Any]:
     """Infer kernel spec from the sample call's ``args`` and ``kwargs``.
 
     Tensor dtype: ``mangle_type``, alignment: ``data_ptr() % 16``.
@@ -661,7 +687,13 @@ def collect(
             f"but its AOT compile can use only one."
         )
     try:
-        _collect_triton_spec(marker.fn, marker.annotations, *args, **kwargs)
+        _collect_triton_spec(
+            marker.fn,
+            marker.annotations,
+            args,
+            kwargs,
+            label=getattr(marker, "label", None),
+        )
     finally:
         # Also when collection raises after storing a spec.
         collected = kernel_specs.get(marker.fn)

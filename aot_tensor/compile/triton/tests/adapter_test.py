@@ -513,12 +513,36 @@ class CollectTritonSpecTest(_ResetStateTest):
         fake_kernel.arg_names = ["X", "N"]
         return fake_kernel
 
+    @staticmethod
+    def _make_fake_kernel_with_label():  # pyre-ignore[3]
+        def fake_kernel(
+            X,
+            label,
+        ) -> None:
+            pass
+
+        fake_kernel.arg_names = ["X", "label"]
+        return fake_kernel
+
+    def test_kernel_with_its_own_label_argument_collects(self) -> None:
+        # Collection metadata used to ride the splatted launch kwargs, so a
+        # kernel declaring its OWN ``label`` parameter raised "got multiple
+        # values for keyword argument 'label'" — even with the marker's
+        # label unset. Launch arguments travel as containers now, keeping
+        # provenance outside the kernel-argument namespace.
+        fake_kernel = self._make_fake_kernel_with_label()
+        x = torch.randn(4, 4)
+        _collect_triton_spec(fake_kernel, {}, (x,), {"label": 10}, label="prov")
+        kernel_specs = get_kernel_specs(TritonAdapter.name)
+        self.assertIn(fake_kernel, kernel_specs)
+        self.assertEqual(kernel_specs[fake_kernel].specs[0]["label"], "prov")
+
     def test_collect_spec_adds_kernel_spec(self) -> None:
         """An unannotated int is specialized like the Triton JIT (10 fits i32),
         with the all-i64 inferred spec as the fallback."""
         fake_kernel = self._make_fake_kernel_xn()
         x = torch.randn(4, 4)
-        _collect_triton_spec(fake_kernel, {}, x, 10)
+        _collect_triton_spec(fake_kernel, {}, (x, 10), {})
 
         kernel_specs = get_kernel_specs(TritonAdapter.name)
         self.assertIn(fake_kernel, kernel_specs)
@@ -553,7 +577,7 @@ class CollectTritonSpecTest(_ResetStateTest):
             x = torch.randn(4, 4).to(torch.int64)
         else:
             x = torch.randn(4, 4)
-        _collect_triton_spec(fake_kernel, annotations, x, n_value)
+        _collect_triton_spec(fake_kernel, annotations, (x, n_value), {})
         self.assertEqual(
             len(get_kernel_specs(TritonAdapter.name)[fake_kernel].specs), expected_count
         )
@@ -569,9 +593,9 @@ class CollectTritonSpecTest(_ResetStateTest):
 
         x = torch.randn(4, 4)
         # pyrefly: ignore [bad-argument-type]
-        _collect_triton_spec(fake_kernel, {}, x)
+        _collect_triton_spec(fake_kernel, {}, (x,), {})
         # pyrefly: ignore [bad-argument-type]
-        _collect_triton_spec(fake_kernel, {}, x)
+        _collect_triton_spec(fake_kernel, {}, (x,), {})
 
         self.assertEqual(
             len(get_kernel_specs(TritonAdapter.name)[fake_kernel].specs), 1
@@ -625,12 +649,8 @@ class PerArgRelaxationTest(_ResetStateTest):
         _collect_triton_spec(
             _LINEAR_KERNEL,
             _LINEAR_ANNOTATIONS,
-            x,
-            w,
-            m,
-            n,
-            x.stride(0),
-            x.stride(1),
+            (x, w, m, n, x.stride(0), x.stride(1)),
+            {},
         )
 
     @staticmethod
@@ -721,15 +741,8 @@ class IntSpecializationTest(_ResetStateTest):
         _collect_triton_spec(
             _MUL_DROPOUT_KERNEL,
             _MUL_DROPOUT_ANNOTATIONS,
-            x,
-            u,
-            y,
-            w,
-            m,
-            d,
-            x.stride(0),
-            u.stride(0),
-            0,
+            (x, u, y, w, m, d, x.stride(0), u.stride(0), 0),
+            {},
         )
 
     def test_unannotated_ints_specialized_with_fallback(self) -> None:
@@ -927,7 +940,7 @@ class EnsureMultiConfigAutotunerTest(unittest.TestCase):
                 "aot_tensor.compile.triton.adapter.infer_spec",
                 side_effect=fake_infer_spec,
             ):
-                _collect_triton_spec(autotuner, {}, "ignored")
+                _collect_triton_spec(autotuner, {}, ("ignored",), {})
             self.assertEqual(len(autotuner.configs), 2)
             self.assertTrue(call_order)
             self.assertEqual(set(call_order), {"infer_spec(len_configs=2)"})
