@@ -201,27 +201,14 @@ class InferSpecTest(unittest.TestCase):
         """Test infer_spec with tl.constexpr params and various annotation configs."""
         fake_kernel = self._make_fake_kernel_with_constexpr()
         x = torch.randn(4, 4)
-        result = infer_spec(
-            fake_kernel,
-            annotations,
-            x,
-            4,
-            1e-5,
-            **kwargs,
-        )
+        result = infer_spec(fake_kernel, annotations, (x, 4, 1e-5), kwargs)
         self.assertEqual(result["signature"], expected)
 
     def test_unannotated_scalar_auto_inferred(self) -> None:
         """Non-constexpr params without annotation are auto-inferred from value type."""
         fake_kernel = self._make_fake_kernel_no_constexpr()
         x = torch.randn(4, 4)
-        result = infer_spec(
-            fake_kernel,
-            {},
-            x,
-            10,
-            0.5,
-        )
+        result = infer_spec(fake_kernel, {}, (x, 10, 0.5), {})
         spec = result["signature"]
         self.assertEqual(spec[0], ("*fp32", 16))
         self.assertEqual(spec[1], "i64")
@@ -234,10 +221,8 @@ class InferSpecTest(unittest.TestCase):
         result = infer_spec(
             cast(KernelInterface[Callable[..., Any]], _two_block_kernel),
             {},
-            x,
-            x,
-            BLOCK_M=16,
-            BLOCK_N=16,
+            (x, x),
+            {"BLOCK_M": 16, "BLOCK_N": 16},
         )
         self.assertEqual(result.get("pointer_range_32"), [0, 1])
 
@@ -269,7 +254,7 @@ class InferSpecTest(unittest.TestCase):
         """infer_spec uses mangle_type to produce canonical Triton dtype strings."""
         fake_kernel = self._make_fake_kernel_no_constexpr()
         x = torch.zeros(4, dtype=torch_dtype)
-        result = infer_spec(fake_kernel, {}, x, 10, 0.5)
+        result = infer_spec(fake_kernel, {}, (x, 10, 0.5), {})
         # PyTorch allocator guarantees ≥64-byte alignment → always (dtype, 16)
         self.assertEqual(result["signature"][0], (expected_dtype_str, 16))
 
@@ -281,7 +266,7 @@ class InferSpecTest(unittest.TestCase):
         self.assertNotEqual(
             x.data_ptr() % 16, 0, "Test setup: tensor must be unaligned"
         )
-        result = infer_spec(fake_kernel, {}, x, 10, 0.5)
+        result = infer_spec(fake_kernel, {}, (x, 10, 0.5), {})
         self.assertEqual(result["signature"][0], "*fp32")
 
     def test_unsupported_tensor_dtype_raises_with_clear_message(self) -> None:
@@ -304,7 +289,7 @@ class InferSpecTest(unittest.TestCase):
             RuntimeError,
             r"unsupported tensor type for X.*Supported tensor dtypes",
         ):
-            infer_spec(fake_kernel, {}, x, 10, 0.5)
+            infer_spec(fake_kernel, {}, (x, 10, 0.5), {})
 
     @parameterized.expand(
         [
@@ -323,7 +308,7 @@ class InferSpecTest(unittest.TestCase):
         fake_kernel = self._make_fake_kernel_no_constexpr()
         x = torch.randn(4, 4)
         with self.assertRaisesRegex(RuntimeError, pattern):
-            infer_spec(fake_kernel, {}, x, bad_value, float_arg)
+            infer_spec(fake_kernel, {}, (x, bad_value, float_arg), {})
 
     def _infer_position_signature(
         self,
@@ -335,16 +320,19 @@ class InferSpecTest(unittest.TestCase):
         spec = infer_spec(
             cast(KernelInterface[Callable[..., Any]], _mock_position_kernel),
             POSITION_ANNOTATIONS,
-            SeqEmb=torch.empty((16, 8), dtype=torch.bfloat16),
-            Offsets=torch.empty((3,), dtype=torch.int64),
-            Lengths=torch.empty((2,), dtype=torch.int64),
-            PosEmb=torch.empty((32, 8), dtype=pos_dtype),
-            TsEmb=torch.empty((2048, 8), dtype=ts_dtype),
-            Out=torch.empty((16, 8), dtype=torch.bfloat16),
-            TS=torch.empty((16,), dtype=timestamp_dtype),
-            PosInds=torch.empty((16,), dtype=torch.int32),
-            TsInds=torch.empty((16,), dtype=torch.int32),
-            NumTargets=torch.empty((2,), dtype=torch.int64),
+            (),
+            {
+                "SeqEmb": torch.empty((16, 8), dtype=torch.bfloat16),
+                "Offsets": torch.empty((3,), dtype=torch.int64),
+                "Lengths": torch.empty((2,), dtype=torch.int64),
+                "PosEmb": torch.empty((32, 8), dtype=pos_dtype),
+                "TsEmb": torch.empty((2048, 8), dtype=ts_dtype),
+                "Out": torch.empty((16, 8), dtype=torch.bfloat16),
+                "TS": torch.empty((16,), dtype=timestamp_dtype),
+                "PosInds": torch.empty((16,), dtype=torch.int32),
+                "TsInds": torch.empty((16,), dtype=torch.int32),
+                "NumTargets": torch.empty((2,), dtype=torch.int64),
+            },
         )
 
         return spec["signature"]
@@ -1226,7 +1214,9 @@ class CompileOptionsLaunchTest(_ResetStateTest):
     ) -> None:
         x = torch.randn(4, 4)
         marker = TritonAOT(_two_block_kernel, {}, compile_options=compile_options)
-        plain_spec = infer_spec(_two_block_kernel, {}, x, x, BLOCK_M=16, BLOCK_N=16)
+        plain_spec = infer_spec(
+            _two_block_kernel, {}, (x, x), {"BLOCK_M": 16, "BLOCK_N": 16}
+        )
 
         repeated = self._launch(marker, target, x, **compile_options)
         specs = get_kernel_specs(TritonAdapter.name)[_two_block_kernel].specs

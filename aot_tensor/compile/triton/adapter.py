@@ -11,7 +11,7 @@ import os
 import pickle
 from dataclasses import dataclass
 from inspect import getcallargs, Parameter, signature
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import torch
 
@@ -90,12 +90,12 @@ def _collect_triton_spec(
     - inferred has perf hints the annotation lacks (perf variant).
     """
     _ensure_multi_config_autotuner(fn)
-    spec = infer_spec(fn, annotations, *args, **kwargs)
+    spec = infer_spec(fn, annotations, args, kwargs)
     annotated_hash = hash_spec(spec)
     add_spec(TRITON, fn, spec, annotated_hash)
 
     if annotations:
-        inferred = infer_spec(fn, {}, *args, **kwargs)
+        inferred = infer_spec(fn, {}, args, kwargs)
         inferred_hash = hash_spec(inferred)
         if inferred_hash == annotated_hash:
             return
@@ -103,7 +103,7 @@ def _collect_triton_spec(
         relaxed_annotations = _relax_annotations(annotations, sample_args)
         conflicts = relaxed_annotations != annotations
         if conflicts:
-            relaxed = infer_spec(fn, relaxed_annotations, *args, **kwargs)
+            relaxed = infer_spec(fn, relaxed_annotations, args, kwargs)
             add_spec(TRITON, fn, relaxed, hash_spec(relaxed))
         if conflicts or _inferred_has_perf_advantage(spec, inferred):
             add_spec(TRITON, fn, inferred, inferred_hash)
@@ -261,10 +261,10 @@ def _relax_annotations(
 def infer_spec(  # noqa: C901
     fn: KernelInterface[Callable[..., Any]],
     annotations: Dict[str, Annotation],
-    *args: Any,
-    **kwargs: Any,
+    args: Sequence[Any],
+    kwargs: Mapping[str, Any],
 ) -> Dict[str, List[Any]]:
-    """Infer kernel spec from sample args.
+    """Infer kernel spec from the sample call's ``args`` and ``kwargs``.
 
     Tensor dtype: ``mangle_type``, alignment: ``data_ptr() % 16``.
     Scalar int: always ``"i64"`` (safe default; user can annotate ``"i32"``
