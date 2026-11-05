@@ -28,6 +28,7 @@ from aot_tensor.compile.triton.adapter import (
     _ensure_multi_config_autotuner,
     _extract_default_values,
     _inferred_has_perf_advantage,
+    _jit_int_spec,
     _relax_annotation,
     _resolve_autotune_cache,
     _resolve_call_args,
@@ -513,16 +514,17 @@ class CollectTritonSpecTest(_ResetStateTest):
         return fake_kernel
 
     def test_collect_spec_adds_kernel_spec(self) -> None:
+        """An unannotated int is specialized like the Triton JIT (10 fits i32),
+        with the all-i64 inferred spec as the fallback."""
         fake_kernel = self._make_fake_kernel_xn()
         x = torch.randn(4, 4)
         _collect_triton_spec(fake_kernel, {}, x, 10)
 
         kernel_specs = get_kernel_specs(TritonAdapter.name)
         self.assertIn(fake_kernel, kernel_specs)
-        self.assertEqual(len(kernel_specs[fake_kernel].specs), 1)
         self.assertEqual(
-            kernel_specs[fake_kernel].specs[0]["signature"],
-            [("*fp32", 16), "i64"],
+            [s["signature"] for s in kernel_specs[fake_kernel].specs],
+            [[("*fp32", 16), "i32"], [("*fp32", 16), "i64"]],
         )
 
     @parameterized.expand(
@@ -670,6 +672,94 @@ class PerArgRelaxationTest(_ResetStateTest):
         self.assertEqual(
             [s.divisible_by_16 for s in self._dispatch_order()],
             [{0, 1, 2, 3, 4}, {0, 1, 3, 4}, {0, 1, 2, 4}, {0, 1, 4}, {0, 1}],
+        )
+
+
+def _mul_dropout_like_kernel(X, U, Y, W, dim_M, dim_D, stride_x, stride_u, seed):
+    pass
+
+
+_MUL_DROPOUT_KERNEL: Any = _mul_dropout_like_kernel
+_MUL_DROPOUT_KERNEL.arg_names = [
+    "X",
+    "U",
+    "Y",
+    "W",
+    "dim_M",
+    "dim_D",
+    "stride_x",
+    "stride_u",
+    "seed",
+]
+# weighted_mul_dropout's annotations: only the seed.
+_MUL_DROPOUT_ANNOTATIONS: Dict[str, Any] = {"seed": "i64"}
+_PTRS: List[Any] = [_P, _P, _P, _P]
+_MUL_DROPOUT_INFERRED: List[Any] = _PTRS + ["i64", "i64", "i64", "i64", "i64"]
+
+
+class JitIntSpecTest(unittest.TestCase):
+    @parameterized.expand(
+        [
+            ("one_folds", 1, ("i32", 1)),
+            ("div16", 512, ("i32", 16)),
+            ("div16_overflows_i32", 3_000_000_000, ("i64", 16)),
+            ("no_hint", 37, "i32"),
+            ("no_hint_overflows_i32", 3_000_000_001, "i64"),
+        ]
+    )
+    def test_jit_int_spec(self, _name: str, value: int, expected: Any) -> None:
+        self.assertEqual(_jit_int_spec(value), expected)
+
+
+class IntSpecializationTest(_ResetStateTest):
+    """Unannotated ints are specialized on the sample like the Triton JIT,
+    with the all-i64 inferred spec kept as the fallback."""
+
+    @staticmethod
+    def _collect(m: int, d: int) -> None:
+        x, u, y, w = (torch.empty(m, d) for _ in range(4))
+        _collect_triton_spec(
+            _MUL_DROPOUT_KERNEL,
+            _MUL_DROPOUT_ANNOTATIONS,
+            x,
+            u,
+            y,
+            w,
+            m,
+            d,
+            x.stride(0),
+            u.stride(0),
+            0,
+        )
+
+    def test_unannotated_ints_specialized_with_fallback(self) -> None:
+        """dim_D=64 and the row strides get hint 16; dim_M=37 stays bare.
+        A runtime dim_D that is not divisible falls back to the inferred
+        spec, which is what every call ran before."""
+        self._collect(37, 64)
+        specs = get_kernel_specs(TritonAdapter.name)[_MUL_DROPOUT_KERNEL].specs
+        self.assertEqual(
+            [s["signature"] for s in specs],
+            [
+                _PTRS + ["i32", ("i32", 16), ("i32", 16), ("i32", 16), "i64"],
+                _MUL_DROPOUT_INFERRED,
+            ],
+        )
+
+    def test_narrower_spec_dispatches_first_in_any_collection_order(self) -> None:
+        """dim_D=40 specializes less than dim_D=64; the dim_D=64 spec still
+        dispatches first when collected last."""
+        self._collect(37, 40)
+        self._collect(37, 64)
+        specs = get_kernel_specs(TritonAdapter.name)[_MUL_DROPOUT_KERNEL].specs
+        unit = OpsUnit.from_raw_specs(specs, GPUTarget("cuda", 80, 32))
+        self.assertEqual(
+            [(s.signature[5], s.divisible_by_16) for s in unit.specs],
+            [
+                ("i32", {0, 1, 2, 3, 5, 6, 7}),
+                ("i32", {0, 1, 2, 3}),
+                ("i64", {0, 1, 2, 3}),
+            ],
         )
 
 
@@ -839,7 +929,8 @@ class EnsureMultiConfigAutotunerTest(unittest.TestCase):
             ):
                 _collect_triton_spec(autotuner, {}, "ignored")
             self.assertEqual(len(autotuner.configs), 2)
-            self.assertEqual(call_order, ["infer_spec(len_configs=2)"])
+            self.assertTrue(call_order)
+            self.assertEqual(set(call_order), {"infer_spec(len_configs=2)"})
         finally:
             state.reset()
 
@@ -1560,10 +1651,12 @@ class CompileOptionsLaunchTest(_ResetStateTest):
                 )
             )
 
-        (kernel,) = compiled
-        self.assertEqual(kernel.metadata.enable_fp_fusion, fused)
-        self.assertEqual("fma.rn.f32" in kernel.asm["ptx"], fused)
-        self.assertEqual("mul.rn.f32" in kernel.asm["ptx"], not fused)
+        # The specialized spec and its inferred fallback both compile.
+        self.assertEqual(len(compiled), 2)
+        for kernel in compiled:
+            self.assertEqual(kernel.metadata.enable_fp_fusion, fused)
+            self.assertEqual("fma.rn.f32" in kernel.asm["ptx"], fused)
+            self.assertEqual("mul.rn.f32" in kernel.asm["ptx"], not fused)
 
     @parameterized.expand(
         [

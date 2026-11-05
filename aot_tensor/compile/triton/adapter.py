@@ -81,32 +81,34 @@ def _collect_triton_spec(
 ) -> None:
     """Record the specs for one Triton kernel call (invoked by ``collect``).
 
-    Always collects the annotated spec (which equals the inferred spec
-    when no annotations are present).  When the sample violates some
-    annotations, also collects a relaxed spec that relaxes only those
-    (``_relax_annotation``).  Also collects the inferred spec when it
-    differs and either:
-    - annotations conflict with sample (fallback for safety), or
+    Always collects the annotated spec, with unannotated ints specialized on
+    the sample like the Triton JIT (``_jit_int_spec``).  When the sample
+    violates some annotations, also collects a relaxed spec that relaxes only
+    those (``_relax_annotation``).  Also collects the inferred spec (no
+    annotations, every int a bare ``i64``) as the fallback when it differs and
+    either:
+    - annotations conflict with sample,
+    - an unannotated int got specialized, or
     - inferred has perf hints the annotation lacks (perf variant).
     """
     _ensure_multi_config_autotuner(fn)
-    spec = infer_spec(fn, annotations, args, kwargs)
-    annotated_hash = hash_spec(spec)
-    add_spec(TRITON, fn, spec, annotated_hash)
+    plain = infer_spec(fn, annotations, args, kwargs)
+    spec = infer_spec(fn, annotations, args, kwargs, specialize_ints=True)
+    add_spec(TRITON, fn, spec, hash_spec(spec))
 
-    if annotations:
-        inferred = infer_spec(fn, {}, args, kwargs)
-        inferred_hash = hash_spec(inferred)
-        if inferred_hash == annotated_hash:
-            return
-        _, sample_args = _resolve_call_args(fn, *args, **kwargs)
-        relaxed_annotations = _relax_annotations(annotations, sample_args)
-        conflicts = relaxed_annotations != annotations
-        if conflicts:
-            relaxed = infer_spec(fn, relaxed_annotations, args, kwargs)
-            add_spec(TRITON, fn, relaxed, hash_spec(relaxed))
-        if conflicts or _inferred_has_perf_advantage(spec, inferred):
-            add_spec(TRITON, fn, inferred, inferred_hash)
+    inferred = infer_spec(fn, {}, args, kwargs)
+    if inferred == spec:
+        return
+    _, sample_args = _resolve_call_args(fn, *args, **kwargs)
+    relaxed_annotations = _relax_annotations(annotations, sample_args)
+    conflicts = relaxed_annotations != annotations
+    if conflicts:
+        relaxed = infer_spec(
+            fn, relaxed_annotations, args, kwargs, specialize_ints=True
+        )
+        add_spec(TRITON, fn, relaxed, hash_spec(relaxed))
+    if conflicts or spec != plain or _inferred_has_perf_advantage(spec, inferred):
+        add_spec(TRITON, fn, inferred, hash_spec(inferred))
 
 
 # =====================================================================
@@ -155,6 +157,11 @@ def _inferred_has_perf_advantage(
     that a bare string does not.  When inference adds such hints (e.g.,
     tensor alignment from ``data_ptr() % 16 == 0``), the inferred spec
     produces a more optimized cubin worth keeping as a perf variant.
+
+    Only fires for a bare pointer annotation (``"*ty"``) with an aligned
+    sample. Likely dead code: no ``triton_aot/ops`` kernel annotates a bare
+    pointer, and PPO's ``KernelVariant`` (``_aott_variants.py``) gives its
+    bare-pointer variants misaligned samples on purpose.
     """
     for ann_elem, inf_elem in zip(
         annotated_spec["signature"], inferred_spec["signature"]
@@ -258,17 +265,30 @@ def _relax_annotations(
     return relaxed
 
 
+def _jit_int_spec(value: int) -> str | tuple[str, int]:
+    """Specialize an int like the Triton JIT: ``i32`` if it fits, else ``i64``;
+    hint 1 (folded to constexpr) for 1, hint 16 if divisible by 16."""
+    dtype = "i32" if _sample_satisfies_int_type(value, "i32") else "i64"
+    if value == 1:
+        return (dtype, 1)
+    if value % 16 == 0:
+        return (dtype, 16)
+    return dtype
+
+
 def infer_spec(  # noqa: C901
     fn: KernelInterface[Callable[..., Any]],
     annotations: Dict[str, Annotation],
     args: Sequence[Any],
     kwargs: Mapping[str, Any],
+    specialize_ints: bool = False,
 ) -> Dict[str, List[Any]]:
     """Infer kernel spec from the sample call's ``args`` and ``kwargs``.
 
     Tensor dtype: ``mangle_type``, alignment: ``data_ptr() % 16``.
-    Scalar int: always ``"i64"`` (safe default; user can annotate ``"i32"``
-    to get a narrower variant via annotation-as-variant).
+    Scalar int: ``"i64"`` (safe default; user can annotate ``"i32"`` to get a
+    narrower variant via annotation-as-variant), or with ``specialize_ints``
+    specialized on the sample like the Triton JIT (``_jit_int_spec``).
     Float: ``mangle_type`` → fp32.
     ``"pointer_range_32"`` lists tensor args the ROCm JIT would tag
     ``tt.pointer_range=32`` (see ``pointer_range_32_args``); only AMD targets
@@ -320,18 +340,13 @@ def infer_spec(  # noqa: C901
                 f"to the kernel signature."
             )
         elif isinstance(arg, int):
-            # Always i64 for safety; users annotate "i32" for narrower
-            # variant via annotation-as-variant.
-            # TODO: observe scalar divisibility (arg % 16, arg % 8) like
-            # tensor alignment — produces optimized spec with divisible_by_16
-            # guard, potential QPS improvement from skipping boundary checks.
             if not -(2**63) <= arg <= 2**63 - 1:
                 raise RuntimeError(
                     f"TritonAOT: unsupported int value for {arg_name}: "
                     f"value exceeds i64 range. "
                     f"Use a smaller value or tl.constexpr."
                 )
-            spec.append("i64")
+            spec.append(_jit_int_spec(arg) if specialize_ints else "i64")
         elif isinstance(arg, float):
             spec.append("fp32")
         else:
