@@ -7,11 +7,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Union
 
-from aot_tensor.arg_specs.common import ConstexprArg, ScalarArg
+from aot_tensor.arg_specs.common import ConstexprArg, ScalarArg, TensorArg
 
 
-@dataclass(frozen=True)
-class FlyTensorArg:
+@dataclass(frozen=True, kw_only=True)
+class FlyTensorArg(TensorArg):
     """Runtime tensor argument for FlyDSL AOT.
 
     Bound as ``flyc.from_torch_tensor(t, assumed_align=alignment)
@@ -19,8 +19,6 @@ class FlyTensorArg:
     launcher serves every shape of a given dtype/rank/layout order.
     """
 
-    name: str
-    leading_dim: int | None = None
     divisibility: int = 1
     alignment: int = 16
 

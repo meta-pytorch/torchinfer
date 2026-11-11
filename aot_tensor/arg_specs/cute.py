@@ -7,11 +7,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Tuple, Union
 
-from aot_tensor.arg_specs.common import ConstexprArg, ScalarArg
+from aot_tensor.arg_specs.common import ConstexprArg, ScalarArg, TensorArg
 
 
-@dataclass(frozen=True)
-class CuTeTensorArg:
+@dataclass(frozen=True, kw_only=True)
+class CuTeTensorArg(TensorArg):
     """Runtime tensor argument for CuTeDSL AOT.
 
     ``leading_dim`` / ``compact_mode`` / ``stride_order`` / ``divisibility`` are
@@ -24,9 +24,7 @@ class CuTeTensorArg:
     and IR verification rejects the copy.
     """
 
-    name: str
     alignment: int = 16
-    leading_dim: Optional[int] = None
     compact_mode: Optional[int] = None
     stride_order: Optional[Tuple[int, ...]] = None
     divisibility: int = 1

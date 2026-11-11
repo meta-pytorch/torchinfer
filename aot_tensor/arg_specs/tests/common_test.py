@@ -8,15 +8,18 @@ from dataclasses import dataclass
 
 import torch
 from aot_tensor.arg_specs.common import (
+    ArgSpec,
     ConstexprArg,
     module_basename_for_callable,
-    NamedArgSpec,
     resolve_runtime_args,
     sample_spec_and_hash,
     scalar_hash_key,
     ScalarArg,
     tensor_hash_key,
+    TensorArg,
 )
+from aot_tensor.arg_specs.cute import CuTeTensorArg
+from aot_tensor.arg_specs.fly import FlyTensorArg
 from parameterized import parameterized
 
 
@@ -64,9 +67,8 @@ class ResolveRuntimeArgsTest(unittest.TestCase):
 
 
 class SampleSpecAndHashTest(unittest.TestCase):
-    # _Arg is neither scalar nor constexpr, so it is keyed as a tensor.
-    SPECS: list[NamedArgSpec] = [
-        _Arg("x"),
+    SPECS: list[ArgSpec] = [
+        TensorArg("x"),
         ScalarArg("n", "i32"),
         ConstexprArg("flag", bool),
     ]
@@ -93,6 +95,34 @@ class SampleSpecAndHashTest(unittest.TestCase):
     def test_constexpr_type_mismatch_rejected(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "constexpr arg flag"):
             sample_spec_and_hash(self.SPECS, "op", "toy", torch.randn(8), 4, flag="no")
+
+    def test_unknown_spec_kind_rejected(self) -> None:
+        # _Arg is not an ArgSpec.
+        with self.assertRaisesRegex(RuntimeError, "unsupported arg spec"):
+            # pyrefly: ignore[bad-argument-type]
+            sample_spec_and_hash([_Arg("x")], "op", "toy", torch.randn(8))
+
+
+_TENSOR_ARG_CLASSES: list[tuple[str, type[TensorArg]]] = [
+    ("base", TensorArg),
+    ("cute", CuTeTensorArg),
+    ("fly", FlyTensorArg),
+]
+
+
+class TensorArgTest(unittest.TestCase):
+    @parameterized.expand(_TENSOR_ARG_CLASSES)
+    def test_only_name_is_positional(self, _name: str, cls: type[TensorArg]) -> None:
+        with self.assertRaises(TypeError):
+            # pyrefly: ignore[bad-argument-count]
+            cls("x", 1)
+
+    @parameterized.expand(_TENSOR_ARG_CLASSES)
+    def test_negative_leading_dim_rejected(
+        self, _name: str, cls: type[TensorArg]
+    ) -> None:
+        with self.assertRaisesRegex(RuntimeError, "leading_dim must be >= 0"):
+            cls("x", leading_dim=-1)
 
 
 class ScalarHashKeyTest(unittest.TestCase):

@@ -4,11 +4,11 @@
 
 from __future__ import annotations
 
-# Shared by the arg-spec DSLs: scalar/constexpr specs, arg binding and the
-# specialization hash key. Each DSL only defines its own tensor spec.
+# Shared by the arg-spec DSLs: scalar/constexpr specs, the TensorArg base, arg
+# binding and the specialization hash key.
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from aot_tensor.compile.adapter_base import hash_spec
@@ -33,6 +33,30 @@ class ConstexprArg:
 
     name: str
     python_type: type[Any]
+
+
+@dataclass(frozen=True)
+class TensorArg:
+    """Runtime tensor argument. Holds only what DSL-agnostic code reads; each DSL
+    subclasses it with its own fields. ``leading_dim``: the dim kept at stride 1
+    (>= 0), ``None`` to auto-detect. Fields after ``name`` are keyword-only, so a
+    positional value can't land in the wrong field of a subclass."""
+
+    name: str
+    leading_dim: int | None = field(default=None, kw_only=True)
+
+    def __post_init__(self) -> None:
+        # The spec doesn't know the rank, so -1 can't be resolved here; FlyDSL
+        # would also read it as auto-detect.
+        if self.leading_dim is not None and self.leading_dim < 0:
+            raise RuntimeError(
+                f"{type(self).__name__} {self.name}: leading_dim must be >= 0, "
+                f"or None to auto-detect; got {self.leading_dim}."
+            )
+
+
+# All arg spec kinds.
+ArgSpec = ScalarArg | ConstexprArg | TensorArg
 
 
 @dataclass
@@ -130,12 +154,12 @@ def scalar_hash_key(arg: Any, dtype: str) -> dict[str, Any]:
 
 
 def spec_hash_key(
-    arg_specs: Sequence[NamedArgSpec],
+    arg_specs: Sequence[ArgSpec],
     op_name: str,
     jit_module: str,
     values: dict[str, Any],
 ) -> dict[str, Any]:
-    """Specialization key of a call. Specs other than scalar/constexpr are tensors."""
+    """Specialization key of a call."""
     args: list[dict[str, Any]] = []
     for spec in arg_specs:
         value = values[spec.name]
@@ -150,13 +174,15 @@ def spec_hash_key(
                     f"expected {spec.python_type}, got {type(value)}."
                 )
             args.append({"name": spec.name, "constexpr": value})
-        else:
+        elif isinstance(spec, TensorArg):
             args.append({"name": spec.name, "tensor": tensor_hash_key(value)})
+        else:
+            raise RuntimeError(f"AOT-T {op_name}: unsupported arg spec {spec!r}.")
     return {"name": op_name, "jit_module": jit_module, "args": args}
 
 
 def sample_spec_and_hash(
-    arg_specs: Sequence[NamedArgSpec],
+    arg_specs: Sequence[ArgSpec],
     op_name: str,
     jit_module: str,
     *args: Any,
