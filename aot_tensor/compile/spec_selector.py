@@ -8,9 +8,12 @@ from __future__ import annotations
 # and FlyDSL. Reads only a spec's ``hash_key["args"]`` (built by
 # ``arg_specs.common``), so it imports no DSL:
 #
-#   {"name": n, "tensor": {"dtype", "dim", "layout_order", "aligned16"}}
+#   {"name": n, "tensor": {"dtype", "dim", "leading_dim", "aligned16"}}
 #   {"name": n, "scalar": {"dtype"}}
 #   {"name": n, "constexpr": value}
+#
+# A tensor matches on what the compiled code assumes: dtype, rank, and the
+# static unit stride of its leading dim (``arg_specs.common.leading_dim``).
 #
 # Not matched:
 # - scalar: its dtype comes from the arg spec, so it is the same in every spec.
@@ -58,13 +61,9 @@ def _tensor_terms(name: str, key: dict[str, Any]) -> list[str]:
     if stable_dtype is None:
         raise NotImplementedError(f"unsupported tensor dtype {key['dtype']} for {name}")
     terms = [f"{name}.scalar_type() == {stable_dtype}", f"{name}.dim() == {key['dim']}"]
-    # layout_order sorts dims by descending stride, ties in index order. So equal
-    # strides pass (>=) only in index order: a tensor matches exactly one order.
-    order = key["layout_order"]
-    terms += [
-        f"{name}.stride({a}) {'>=' if a < b else '>'} {name}.stride({b})"
-        for a, b in zip(order, order[1:])
-    ]
+    # After the rank term, so the index is in range.
+    if key["leading_dim"] is not None:
+        terms.append(f"{name}.stride({key['leading_dim']}) == 1")
     return terms
 
 
@@ -83,7 +82,10 @@ def describe(args: list[dict[str, Any]]) -> str:
     for arg in args:
         if "tensor" in arg:
             t = arg["tensor"]
-            parts.append(f"{arg['name']}: {t['dtype']} rank {t['dim']}")
+            part = f"{arg['name']}: {t['dtype']} rank {t['dim']}"
+            if t["leading_dim"] is not None:
+                part += f" unit-stride dim {t['leading_dim']}"
+            parts.append(part)
         elif "constexpr" in arg:
             parts.append(f"{arg['name']}={arg['constexpr']!r}")
     return ", ".join(parts)

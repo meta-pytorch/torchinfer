@@ -10,6 +10,7 @@ import torch
 from aot_tensor.arg_specs.common import (
     ArgSpec,
     ConstexprArg,
+    leading_dim,
     module_basename_for_callable,
     resolve_runtime_args,
     sample_spec_and_hash,
@@ -72,6 +73,20 @@ class SampleSpecAndHashTest(unittest.TestCase):
         ScalarArg("n", "i32"),
         ConstexprArg("flag", bool),
     ]
+
+    @parameterized.expand(
+        [
+            ("base", TensorArg("x", leading_dim=1)),
+            ("cute", CuTeTensorArg("x", leading_dim=1)),
+            ("fly", FlyTensorArg("x", leading_dim=1)),
+        ]
+    )
+    def test_tensor_key_uses_the_spec_leading_dim(
+        self, _name: str, arg: TensorArg
+    ) -> None:
+        # (8, 1) has stride 1 in both dims; auto-detection would pick dim 0.
+        spec, _ = sample_spec_and_hash([arg], "op", "toy", torch.empty(8, 1))
+        self.assertEqual(spec.hash_key["args"][0]["tensor"]["leading_dim"], 1)
 
     def test_hash_key_and_runtime_args(self) -> None:
         x = torch.randn(8)
@@ -149,6 +164,41 @@ class ScalarHashKeyTest(unittest.TestCase):
             scalar_hash_key(value, dtype)
 
 
+def _jagged_view(m: int) -> torch.Tensor:
+    # How the jagged_dense_bmm CuTeDSL launchers pass (M, K): [M, K, 1] with
+    # strides (K, 1, M * K).
+    return torch.empty(m, 128).unsqueeze(0).permute(1, 2, 0)
+
+
+class LeadingDimTest(unittest.TestCase):
+    @parameterized.expand(
+        [
+            ("contiguous", lambda: torch.empty(4, 8), 1),
+            ("transposed", lambda: torch.empty(8, 4).t(), 0),
+            # Both dims have stride 1; only dim 0 has size > 1.
+            ("unit_stride_tie", lambda: torch.empty(8, 1), 0),
+            ("no_unit_stride", lambda: torch.empty(8, 4)[:, ::2], None),
+            ("ambiguous", lambda: torch.empty(1, 1), None),
+            # M <= 1 reorders the other strides; the unit-stride dim stays.
+            *[
+                (f"jagged_view_m{m}", lambda m=m: _jagged_view(m), 1)
+                for m in (512, 1, 0)
+            ],
+        ]
+    )
+    def test_auto_detect(
+        self, _name: str, make: Callable[[], torch.Tensor], expected: int | None
+    ) -> None:
+        self.assertEqual(leading_dim(make()), expected)
+
+    def test_spec_leading_dim_wins(self) -> None:
+        self.assertEqual(leading_dim(torch.empty(8, 1), 1), 1)
+
+    def test_spec_leading_dim_out_of_range_rejected(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "out of range for a rank-2"):
+            leading_dim(torch.empty(8, 1), 2)
+
+
 class TensorHashKeyTest(unittest.TestCase):
     def test_contiguous_tensor(self) -> None:
         self.assertEqual(
@@ -156,7 +206,7 @@ class TensorHashKeyTest(unittest.TestCase):
             {
                 "dtype": "torch.float32",
                 "dim": 2,
-                "layout_order": (0, 1),
+                "leading_dim": 1,
                 "aligned16": True,
             },
         )
@@ -169,7 +219,7 @@ class TensorHashKeyTest(unittest.TestCase):
 
     @parameterized.expand(
         [
-            ("transposed", lambda: torch.empty(8, 4).t(), "layout_order", (1, 0)),
+            ("transposed", lambda: torch.empty(8, 4).t(), "leading_dim", 0),
             (
                 "fp16",
                 lambda: torch.empty(4, 8, dtype=torch.half),

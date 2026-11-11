@@ -16,7 +16,7 @@ class FlyTensorArg(TensorArg):
 
     Bound as ``flyc.from_torch_tensor(t, assumed_align=alignment)
     .mark_layout_dynamic(leading_dim=..., divisibility=...)``, so one compiled
-    launcher serves every shape of a given dtype/rank/layout order.
+    launcher serves every shape of a given dtype/rank/unit-stride dim.
     """
 
     divisibility: int = 1

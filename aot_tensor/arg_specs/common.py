@@ -107,20 +107,37 @@ def module_basename_for_callable(fn: Any) -> str:
     return module.rsplit(".", 1)[-1]
 
 
-def layout_order(arg: Any) -> tuple[int, ...]:
-    """Dim indices sorted by descending stride: contiguous vs transposed,
-    regardless of sizes. Both the AOT spec key and the eager cache key use it."""
-    strides = [int(s) for s in arg.stride()]
-    return tuple(sorted(range(int(arg.dim())), key=lambda i: strides[i], reverse=True))
+def leading_dim(arg: Any, spec_leading_dim: int | None = None) -> int | None:
+    """The dim whose stride the DSL's ``mark_layout_dynamic`` fixes at 1; all
+    other shapes and strides stay dynamic. ``spec_leading_dim`` (the arg
+    spec's ``leading_dim``) wins. Otherwise: the only stride-1 dim; if several,
+    the only one with size > 1; else ``None``.
+
+    This fixed stride is what makes the kernel fast: the compiler knows the
+    elements are contiguous and uses vector loads, ``cp.async`` and TMA (as
+    Triton does for an int arg equal to 1). So a call whose stride there isn't 1
+    must not use that variant."""
+    rank = int(arg.dim())
+    if spec_leading_dim is not None:
+        if not 0 <= spec_leading_dim < rank:
+            raise RuntimeError(
+                f"AOT-T: leading_dim {spec_leading_dim} is out of range for a "
+                f"rank-{rank} tensor."
+            )
+        return spec_leading_dim
+    unit = [d for d in range(rank) if int(arg.stride(d)) == 1]
+    if len(unit) > 1:
+        unit = [d for d in unit if int(arg.size(d)) > 1]
+    return unit[0] if len(unit) == 1 else None
 
 
-def tensor_hash_key(arg: Any) -> dict[str, Any]:
+def tensor_hash_key(arg: Any, spec_leading_dim: int | None = None) -> dict[str, Any]:
     if not hasattr(arg, "dtype"):
         raise RuntimeError(
             f"AOT-T: expected a torch.Tensor-like argument, got {type(arg)!r}."
         )
-    # Layouts are marked dynamic, so one .so serves any shape. Key on the layout
-    # pattern, not sizes, or N shapes would become N specializations.
+    # Key on the leading dim, not on sizes or the other strides: those vary per
+    # call.
     # TODO: specialize on alignment and divisibility, like Triton's
     # tt.divisibility: record the best level each sample meets (capped by the
     # arg spec) instead of aligned16, compile each variant with it, and match it
@@ -132,7 +149,7 @@ def tensor_hash_key(arg: Any) -> dict[str, Any]:
     return {
         "dtype": str(arg.dtype),
         "dim": int(arg.dim()),
-        "layout_order": layout_order(arg),
+        "leading_dim": leading_dim(arg, spec_leading_dim),
         "aligned16": bool(arg.data_ptr() % 16 == 0),
     }
 
@@ -175,7 +192,8 @@ def spec_hash_key(
                 )
             args.append({"name": spec.name, "constexpr": value})
         elif isinstance(spec, TensorArg):
-            args.append({"name": spec.name, "tensor": tensor_hash_key(value)})
+            key = tensor_hash_key(value, spec.leading_dim)
+            args.append({"name": spec.name, "tensor": key})
         else:
             raise RuntimeError(f"AOT-T {op_name}: unsupported arg spec {spec!r}.")
     return {"name": op_name, "jit_module": jit_module, "args": args}

@@ -145,24 +145,18 @@ def _layout_writes(slot: AbiSlot, local: str) -> list[str]:
 
 
 def _layout_checks(slot: AbiSlot, spec: FlyTensorArg) -> list[str]:
-    """The launcher was compiled assuming these (``mark_layout_dynamic``): the
-    leading dim, the one without a stride in the ABI, has stride 1, and every
-    other stride is a multiple of ``divisibility``."""
+    """The launcher assumes every stride in the ABI is a multiple of
+    ``divisibility``. The leading dim's stride-1 check is in the selector."""
+    if spec.divisibility <= 1:
+        return []
     n = slot.arg_name
-    lines = [
-        _require(f"{n}.stride({d}) == 1", f"{n} must have stride 1 in dim {d}")
-        for d in range(len(slot.shape_dims))
-        if d not in slot.stride_dims
+    return [
+        _require(
+            f"{n}.stride({d}) % {spec.divisibility} == 0",
+            f"{n}.stride({d}) must be a multiple of {spec.divisibility}",
+        )
+        for d in slot.stride_dims
     ]
-    if spec.divisibility > 1:
-        lines += [
-            _require(
-                f"{n}.stride({d}) % {spec.divisibility} == 0",
-                f"{n}.stride({d}) must be a multiple of {spec.divisibility}",
-            )
-            for d in slot.stride_dims
-        ]
-    return lines
 
 
 @dataclass(frozen=True)

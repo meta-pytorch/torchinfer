@@ -128,10 +128,10 @@ class GenerateTorchOpTest(unittest.TestCase):
         out = self._render()
         for check in (
             "reinterpret_cast<uintptr_t>(x.data_ptr()) % 16 == 0",
-            "x.stride(1) == 1",
             "x.stride(0) % 4 == 0",
         ):
             self.assertIn(f"if (!({check})) flydsl_fail(", out)
+        self.assertNotIn("x.stride(1) == 1", out)
 
     def test_stays_on_the_stable_abi(self) -> None:
         out = self._render(_FAST, _SLOW)

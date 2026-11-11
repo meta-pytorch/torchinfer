@@ -11,6 +11,7 @@ from aot_tensor.arg_specs.fly import FlyTensorArg
 from aot_tensor.compile.adapter_base import hash_spec
 from aot_tensor.compile.spec_selector import (
     cpp_literal,
+    describe,
     distinct_variants,
     match_condition,
     render_selector,
@@ -34,20 +35,34 @@ def _key(x: torch.Tensor, fast: bool) -> dict[str, Any]:
 
 
 class MatchConditionTest(unittest.TestCase):
-    def test_matches_dtype_rank_layout_and_constexpr_but_not_scalars(self) -> None:
-        x = torch.empty(4, 8).t()  # strides (1, 8): dim 1 is outermost
+    def test_matches_dtype_rank_unit_stride_and_constexpr_but_not_scalars(
+        self,
+    ) -> None:
+        x = torch.empty(4, 8).t()  # strides (1, 8): dim 0 is the leading dim
         self.assertEqual(
             match_condition(_key(x, True)["args"]),
             f"x.scalar_type() == {_FLOAT} && x.dim() == 2 && "
-            "x.stride(1) > x.stride(0) && fast == true",
+            "x.stride(0) == 1 && fast == true",
         )
 
-    def test_tied_strides_match_in_index_order(self) -> None:
-        # strides (1, 1) sort to layout_order (0, 1), so the tie must pass.
-        self.assertIn(
-            "x.stride(0) >= x.stride(1)",
-            match_condition(_key(torch.empty(1, 1), True)["args"]),
+    def test_ignores_the_order_of_the_other_strides(self) -> None:
+        # Strides (K, 1, M * K): M <= 1 reorders them, the condition stays.
+        def view(m: int) -> torch.Tensor:
+            return torch.empty(m, 128).unsqueeze(0).permute(1, 2, 0)
+
+        conditions = {match_condition(_key(view(m), True)["args"]) for m in (512, 1, 0)}
+        self.assertEqual(
+            conditions,
+            {
+                f"x.scalar_type() == {_FLOAT} && x.dim() == 3 && "
+                "x.stride(1) == 1 && fast == true"
+            },
         )
+
+    def test_no_unit_stride_dim_matches_any_strides(self) -> None:
+        args = _key(torch.empty(8, 4)[:, ::2], True)["args"]  # strides (4, 2)
+        self.assertNotIn("stride", match_condition(args))
+        self.assertEqual(describe(args), "x: torch.float32 rank 2, fast=True")
 
     @parameterized.expand(
         [("non_finite", float("inf"), "non-finite"), ("beyond_int64", 2**63, "int64")]
@@ -75,7 +90,10 @@ class DistinctVariantsTest(unittest.TestCase):
             [v.symbol for v in variants],
             [f"op__{hash_spec(on)[:8]}", f"op__{hash_spec(off)[:8]}"],
         )
-        self.assertEqual(variants[1].description, "x: torch.float32 rank 1, fast=False")
+        self.assertEqual(
+            variants[1].description,
+            "x: torch.float32 rank 1 unit-stride dim 0, fast=False",
+        )
 
     def test_specs_differing_only_in_alignment_share_a_variant(self) -> None:
         aligned = _key(torch.empty(8), True)
