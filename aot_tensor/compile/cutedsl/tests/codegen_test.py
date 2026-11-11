@@ -349,6 +349,14 @@ class GenerateContentTest(unittest.TestCase):
             out,
         )
         self.assertIn('cutedsl_i32(n, "n")', out)
+        # Checked once, before dispatch: every variant assumes the same alignment.
+        self.assertIn(
+            "void cutedsl_op(torch::stable::Tensor x, int64_t n) {\n"
+            "  if (reinterpret_cast<uintptr_t>(x.data_ptr()) % 16 != 0) "
+            'cutedsl_fail("x must be 16-byte aligned");\n'
+            "  if (x.scalar_type() == F32) {",
+            out,
+        )
         self.assertIn("if (x.scalar_type() == F32) {\n    op__aaaa_run(x, n);", out)
         self.assertIn("if (x.scalar_type() == F16) {\n    op__bbbb_run(x, n);", out)
         self.assertIn(

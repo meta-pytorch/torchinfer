@@ -139,6 +139,17 @@ class TensorArgTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "leading_dim must be >= 0"):
             cls("x", leading_dim=-1)
 
+    @parameterized.expand(_TENSOR_ARG_CLASSES)
+    def test_alignment_must_be_a_power_of_2(
+        self, _name: str, cls: type[TensorArg]
+    ) -> None:
+        for alignment in (1, 4, 16):
+            self.assertEqual(cls("x", alignment=alignment).alignment, alignment)
+        for alignment in (0, -16, 3, 24):
+            with self.subTest(alignment=alignment):
+                with self.assertRaisesRegex(RuntimeError, "must be a power of 2"):
+                    cls("x", alignment=alignment)
+
 
 class ScalarHashKeyTest(unittest.TestCase):
     @parameterized.expand(

@@ -215,6 +215,10 @@ class ArgCodegen(Generic[_SpecT]):
     def torch_schema_param(self, index: int) -> str:
         raise NotImplementedError
 
+    def torch_checks(self) -> list[str]:
+        """C++ statements rejecting a value the compiled kernel can't take."""
+        return []
+
     # --- sidecar entry surface (runtime kinds only) ---
     def entry_args(self, fields: TensorFields) -> list[EntryArg]:
         return []
@@ -245,6 +249,15 @@ class TensorCodegen(ArgCodegen[CuTeTensorArg]):
         # rule requires for TorchScript; needs an NVIDIA host to validate.
         alias = chr(ord("a") + index)
         return f"Tensor({alias}!) {self.name}"
+
+    def torch_checks(self) -> list[str]:
+        # cute_arg compiles with assumed_align=alignment, and the exported C
+        # wrapper doesn't check it (the eager JIT executor does).
+        n, align = self.name, self.spec.alignment
+        return [
+            f"if (reinterpret_cast<uintptr_t>({n}.data_ptr()) % {align} != 0) "
+            f'cutedsl_fail("{n} must be {align}-byte aligned");'
+        ]
 
     def entry_args(self, fields: TensorFields) -> list[EntryArg]:
         n = self.name
@@ -557,8 +570,9 @@ def generate_torch_op_content(
     # is static and lives verbatim in compile/cutedsl/templates/cutedsl_torch_op.cpp; the per-op
     # name and sidecar basename reach it through the OP_NAME macros. Only the
     # per-variant run functions and the dispatching op body are per-op.
+    checks = [line for cg in codegens for line in cg.torch_checks()]
     op_lines = [f"void cutedsl_op({cpp_params}) {{"]
-    op_lines += [f"  {line}" for line in selector]
+    op_lines += [f"  {line}" for line in [*checks, *selector]]
     op_lines += ["}", "", f"void cutedsl_dummy_op({cpp_params}) {{}}"]
     run_fns = [run_fn(op_name, cute, cpp_params) for cute in variants]
     op_fn = "\n".join([*run_fns, *op_lines]) + "\n"

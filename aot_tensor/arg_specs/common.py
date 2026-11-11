@@ -56,6 +56,12 @@ class TensorArg:
                 f"{type(self).__name__} {self.name}: leading_dim must be >= 0, "
                 f"or None to auto-detect; got {self.leading_dim}."
             )
+        # It becomes `ptr % alignment` in the generated op: 0 would divide by zero.
+        if self.alignment < 1 or self.alignment & (self.alignment - 1):
+            raise RuntimeError(
+                f"{type(self).__name__} {self.name}: alignment must be a power of "
+                f"2; got {self.alignment}."
+            )
 
 
 # All arg spec kinds.

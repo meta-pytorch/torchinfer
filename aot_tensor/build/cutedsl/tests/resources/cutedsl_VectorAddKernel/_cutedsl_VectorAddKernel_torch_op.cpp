@@ -107,6 +107,9 @@ void _cutedsl_VectorAddKernel__11c4c622_run(torch::stable::Tensor x, torch::stab
 }
 
 void cutedsl_op(torch::stable::Tensor x, torch::stable::Tensor y, torch::stable::Tensor out, int64_t n) {
+  if (reinterpret_cast<uintptr_t>(x.data_ptr()) % 16 != 0) cutedsl_fail("x must be 16-byte aligned");
+  if (reinterpret_cast<uintptr_t>(y.data_ptr()) % 16 != 0) cutedsl_fail("y must be 16-byte aligned");
+  if (reinterpret_cast<uintptr_t>(out.data_ptr()) % 16 != 0) cutedsl_fail("out must be 16-byte aligned");
   if (x.scalar_type() == torch::headeronly::ScalarType::Float && x.dim() == 1 && x.stride(0) == 1 && y.scalar_type() == torch::headeronly::ScalarType::Float && y.dim() == 1 && y.stride(0) == 1 && out.scalar_type() == torch::headeronly::ScalarType::Float && out.dim() == 1 && out.stride(0) == 1) {
     _cutedsl_VectorAddKernel__11c4c622_run(x, y, out, n);
     return;
