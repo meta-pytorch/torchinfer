@@ -179,6 +179,38 @@ class MakeCodegenTest(unittest.TestCase):
             make_codegen(object())  # pyre-ignore[6]: intentionally bad spec
 
 
+class TorchChecksTest(unittest.TestCase):
+    def test_compact_checks_size_and_outer_strides(self) -> None:
+        cg = make_codegen(
+            CuTeTensorArg(
+                "a",
+                leading_dim=1,
+                stride_order=(2, 0, 1),
+                compact_mode=1,
+                divisibility=16,
+            )
+        )
+        self.assertEqual(
+            cg.torch_checks()[1:],
+            [
+                "if (a.dim() == 3) {",
+                '  if (a.size(1) % 16 != 0) cutedsl_fail("a.size(1) must be a '
+                'multiple of 16");',
+                "  if (a.size(2) != 1 && a.stride(2) % 16 != 0) "
+                'cutedsl_fail("a.stride(2) must be a multiple of 16");',
+                "  if (a.size(0) != 1 && a.stride(0) % 16 != 0) "
+                'cutedsl_fail("a.stride(0) must be a multiple of 16");',
+                "}",
+            ],
+        )
+
+    def test_divisibility_1_adds_no_compact_checks(self) -> None:
+        cg = make_codegen(
+            CuTeTensorArg("a", stride_order=(0, 1), compact_mode=1, divisibility=1)
+        )
+        self.assertEqual(len(cg.torch_checks()), 1)  # just the alignment check
+
+
 class TorchParamTest(unittest.TestCase):
     def test_tensor_cpp_and_schema(self) -> None:
         cg = make_codegen(CuTeTensorArg("x"))

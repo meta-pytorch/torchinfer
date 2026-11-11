@@ -256,8 +256,33 @@ class TensorCodegen(ArgCodegen[CuTeTensorArg]):
         n, align = self.name, self.spec.alignment
         return [
             f"if (reinterpret_cast<uintptr_t>({n}.data_ptr()) % {align} != 0) "
-            f'cutedsl_fail("{n} must be {align}-byte aligned");'
+            f'cutedsl_fail("{n} must be {align}-byte aligned");',
+            *self._compact_checks(),
         ]
+
+    def _compact_checks(self) -> list[str]:
+        """mark_compact_shape_dynamic promises the compiler that the compact
+        mode's size, and the strides of the modes outside it in stride_order,
+        are multiples of divisibility. Eager checks this when marking; the
+        exported C wrapper doesn't."""
+        spec = self.spec
+        order = spec.stride_order
+        if spec.compact_mode is None or order is None or spec.divisibility == 1:
+            return []
+        n, m, div = self.name, spec.compact_mode, spec.divisibility
+        checks = [
+            f"if ({n}.size({m}) % {div} != 0) "
+            f'cutedsl_fail("{n}.size({m}) must be a multiple of {div}");'
+        ]
+        # Only strides skip size-1 modes: a stride is never used to step over a
+        # size-1 mode, but the size itself is the promise (eager rejects 1 too).
+        checks += [
+            f"if ({n}.size({d}) != 1 && {n}.stride({d}) % {div} != 0) "
+            f'cutedsl_fail("{n}.stride({d}) must be a multiple of {div}");'
+            for d in order[: order.index(m)]
+        ]
+        # The selector checks the rank later; this keeps size(d) in range.
+        return [f"if ({n}.dim() == {len(order)}) {{", *(f"  {c}" for c in checks), "}"]
 
     def entry_args(self, fields: TensorFields) -> list[EntryArg]:
         n = self.name

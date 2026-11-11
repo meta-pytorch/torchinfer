@@ -151,6 +151,32 @@ class TensorArgTest(unittest.TestCase):
                     cls("x", alignment=alignment)
 
 
+class CuTeTensorArgTest(unittest.TestCase):
+    @parameterized.expand(
+        [
+            ("zero_divisibility", None, None, 0, "divisibility must be >= 1"),
+            ("compact_without_order", 1, None, 16, "needs a stride_order"),
+            ("compact_not_in_order", 2, (0, 1), 16, "needs a stride_order"),
+            ("order_not_a_permutation", 1, (0, 2), 16, "needs a stride_order"),
+        ]
+    )
+    def test_rejected(
+        self,
+        _name: str,
+        compact_mode: int | None,
+        stride_order: tuple[int, ...] | None,
+        divisibility: int,
+        error: str,
+    ) -> None:
+        with self.assertRaisesRegex(RuntimeError, error):
+            CuTeTensorArg(
+                "x",
+                compact_mode=compact_mode,
+                stride_order=stride_order,
+                divisibility=divisibility,
+            )
+
+
 class ScalarHashKeyTest(unittest.TestCase):
     @parameterized.expand(
         [
