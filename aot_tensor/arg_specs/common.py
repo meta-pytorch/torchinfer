@@ -37,13 +37,16 @@ class ConstexprArg:
 
 @dataclass(frozen=True)
 class TensorArg:
-    """Runtime tensor argument. Holds only what DSL-agnostic code reads; each DSL
-    subclasses it with its own fields. ``leading_dim``: the dim kept at stride 1
-    (>= 0), ``None`` to auto-detect. Fields after ``name`` are keyword-only, so a
-    positional value can't land in the wrong field of a subclass."""
+    """Runtime tensor argument. Holds the fields every DSL shares; each DSL
+    subclasses it with its own. ``leading_dim``: the dim kept at stride 1
+    (>= 0), ``None`` to auto-detect. ``alignment``: the byte alignment the
+    kernel is compiled to assume for the data pointer. Fields after ``name`` are
+    keyword-only, so a positional value can't land in the wrong field of a
+    subclass."""
 
     name: str
     leading_dim: int | None = field(default=None, kw_only=True)
+    alignment: int = field(default=16, kw_only=True)
 
     def __post_init__(self) -> None:
         # The spec doesn't know the rank, so -1 can't be resolved here; FlyDSL

@@ -20,7 +20,6 @@ class FlyTensorArg(TensorArg):
     """
 
     divisibility: int = 1
-    alignment: int = 16
 
 
 FlyArgSpec = Union[FlyTensorArg, ScalarArg, ConstexprArg]

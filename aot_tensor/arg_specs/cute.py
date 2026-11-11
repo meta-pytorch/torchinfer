@@ -24,7 +24,6 @@ class CuTeTensorArg(TensorArg):
     and IR verification rejects the copy.
     """
 
-    alignment: int = 16
     compact_mode: Optional[int] = None
     stride_order: Optional[Tuple[int, ...]] = None
     divisibility: int = 1
