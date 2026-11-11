@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Sequence
 
 from aot_tensor.build.extension_build_config import ExtensionBuildConfig
 from aot_tensor.build.extension_builder_base import (
@@ -18,31 +19,41 @@ from setuptools import Extension, setup
 
 logger: logging.Logger = logging.getLogger(__name__)
 
-GENERATED_CUDA_LIBRARY_API_MARKER: str = "cudaLibrary_t"
 TOOLKIT_CUDA_LIBRARY_API_MARKER: str = "cudaLibraryLoadData"
 
 
 class CutedslExtensionBuilder(CudaExtensionBuilder):
     """Builds CuTeDSL AOT sidecar and PyTorch op extensions.
 
-    The CuTeDSL-generated object is linked only into the sidecar extension.
-    The PyTorch op extension uses dlopen/dlsym to call that sidecar at runtime.
+    The CuTeDSL-generated .o files (one per specialization) are linked only into
+    the sidecar extension. The PyTorch op extension uses dlopen/dlsym to call
+    that sidecar at runtime.
     """
 
-    def _validate_cutedsl_source_files(self) -> tuple[str, str, str]:
-        header_file = os.path.join(self.source_dir, f"{self.kernel_name}.h")
-        object_file = os.path.join(self.source_dir, f"{self.kernel_name}.o")
+    def __init__(
+        self,
+        source_dir: str,
+        kernel_name: str,
+        output_dir: str,
+        kernel_obj_files: Sequence[str],
+        build_config: ExtensionBuildConfig | None = None,
+    ) -> None:
+        super().__init__(source_dir, kernel_name, output_dir, build_config)
+        self.kernel_obj_files: list[str] = list(kernel_obj_files)
+
+    def _validate_cutedsl_source_files(self) -> tuple[str, str]:
+        assert self.kernel_obj_files, "CuTe build needs at least one kernel object"
+        for obj_file in self.kernel_obj_files:
+            assert os.path.exists(obj_file), f"CuTe object not found: {obj_file}"
         entry_file = os.path.join(self.source_dir, f"{self.kernel_name}_entry.cpp")
         torch_op_file = os.path.join(
             self.source_dir, f"{self.kernel_name}_torch_op.cpp"
         )
-        assert os.path.exists(header_file), f"CuTe header not found: {header_file}"
-        assert os.path.exists(object_file), f"CuTe object not found: {object_file}"
         assert os.path.exists(entry_file), f"CuTe entry source not found: {entry_file}"
         assert os.path.exists(torch_op_file), (
             f"CuTe torch op source not found: {torch_op_file}"
         )
-        return object_file, entry_file, torch_op_file
+        return entry_file, torch_op_file
 
     def _file_contains(self, path: str, marker: str) -> bool:
         if not os.path.exists(path):
@@ -50,17 +61,13 @@ class CutedslExtensionBuilder(CudaExtensionBuilder):
         with open(path, "r", encoding="utf-8", errors="ignore") as fp:
             return marker in fp.read()
 
-    def _generated_header_requires_cuda_library_api(self) -> bool:
-        header_file = os.path.join(self.source_dir, f"{self.kernel_name}.h")
-        return self._file_contains(header_file, GENERATED_CUDA_LIBRARY_API_MARKER)
-
     def _toolkit_supports_cuda_library_api(self, toolkit_path: str) -> bool:
         cuda_runtime_api = os.path.join(toolkit_path, "include", "cuda_runtime_api.h")
         return self._file_contains(cuda_runtime_api, TOOLKIT_CUDA_LIBRARY_API_MARKER)
 
     def _select_cutedsl_gpu_toolkit_path(self) -> None:
-        if not self._generated_header_requires_cuda_library_api():
-            return
+        # The sidecar's cudart shims (templates/cutedsl_entry.cpp) use the
+        # cudaLibrary* API, so every build needs a toolkit that has it.
         if self._toolkit_supports_cuda_library_api(self.gpu_toolkit_path):
             return
 
@@ -77,13 +84,13 @@ class CutedslExtensionBuilder(CudaExtensionBuilder):
                 return
 
         raise RuntimeError(
-            "CuTeDSL AOT generated cudaLibrary* API calls, but the selected CUDA "
+            "The CuTeDSL AOT sidecar calls cudaLibrary* APIs, but the selected CUDA "
             f"toolkit at {self.gpu_toolkit_path} does not expose those APIs. "
             "Use a CUDA toolkit with cudaLibraryLoadData support."
         )
 
     def build(self) -> str:
-        object_file, entry_file, torch_op_file = self._validate_cutedsl_source_files()
+        entry_file, torch_op_file = self._validate_cutedsl_source_files()
         self._select_cutedsl_gpu_toolkit_path()
 
         gpu_include_dirs = self.get_gpu_include_dirs()
@@ -99,7 +106,7 @@ class CutedslExtensionBuilder(CudaExtensionBuilder):
             library_dirs=gpu_lib_dirs,
             libraries=["cuda", "cudart", "dl"],
             extra_compile_args=extra_compile_args,
-            extra_objects=[object_file],
+            extra_objects=self.kernel_obj_files,
             language="c++",
         )
 
@@ -141,6 +148,7 @@ def build_cutedsl_aot_extension(
     source_dir: str,
     kernel_name: str,
     output_dir: str,
+    kernel_obj_files: Sequence[str],
     build_config: ExtensionBuildConfig | None = None,
 ) -> str:
     """Build a CuTeDSL AOT op extension plus its dynamically loaded sidecar."""
@@ -151,5 +159,6 @@ def build_cutedsl_aot_extension(
         source_dir,
         kernel_name,
         output_dir,
+        kernel_obj_files,
         build_config=build_config,
     ).build()

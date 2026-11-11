@@ -141,8 +141,7 @@ def tensor_hash_key(arg: Any, spec_leading_dim: int | None = None) -> dict[str, 
     # TODO: specialize on alignment and divisibility, like Triton's
     # tt.divisibility: record the best level each sample meets (capped by the
     # arg spec) instead of aligned16, compile each variant with it, and match it
-    # in spec_selector.match_condition, stricter variants first. CuTeDSL first
-    # needs the TODO in compile/cutedsl/pipeline.py.
+    # in spec_selector.match_condition, stricter variants first.
     # Unlike Triton, a lower level is not always correct: CuTe-style kernels
     # hard-code copy widths (e.g. a 128-bit BufferCopy), so the fallback must
     # be opt-in. FlyDSL's JIT cache already keys on alignment and divisibility.

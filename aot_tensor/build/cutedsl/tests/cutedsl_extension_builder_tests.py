@@ -10,6 +10,7 @@ toolkit or GPU.
 """
 
 import functools
+import glob
 import os
 import tempfile
 import unittest
@@ -30,6 +31,10 @@ class CutedslExtensionBuilderTest(unittest.TestCase):
             os.path.dirname(__file__),
             "resources",
             _RESOURCE_NAME,
+        )
+        # One {symbol}.o per specialization.
+        self.kernel_obj_files: list[str] = sorted(
+            glob.glob(os.path.join(self.source_dir, f"{_KERNEL_NAME}__*.o"))
         )
 
     def _fake_toolkit(self, path: str, *, supports: bool) -> None:
@@ -63,6 +68,7 @@ class CutedslExtensionBuilderTest(unittest.TestCase):
                 source_dir=self.source_dir,
                 kernel_name=_KERNEL_NAME,
                 output_dir=output_dir,
+                kernel_obj_files=self.kernel_obj_files,
                 build_config=ExtensionBuildConfig(
                     compiler_path="/compiler",
                     gpu_toolkit_path=toolkit,
@@ -106,10 +112,8 @@ class CutedslExtensionBuilderTest(unittest.TestCase):
                 [extension.name for extension in extensions],
                 [f"{ext_name}_cutedsl_impl", ext_name],
             )
-            self.assertEqual(
-                extensions[0].extra_objects,
-                [os.path.join(self.source_dir, f"{_KERNEL_NAME}.o")],
-            )
+            self.assertEqual(len(self.kernel_obj_files), 1)
+            self.assertEqual(extensions[0].extra_objects, self.kernel_obj_files)
             self.assertFalse(extensions[1].extra_objects)
             self.assertEqual(
                 extensions[0].include_dirs,
@@ -120,10 +124,57 @@ class CutedslExtensionBuilderTest(unittest.TestCase):
                 [os.path.join(toolkit, "include"), torch_include_dir],
             )
 
+    def test_build_links_every_variant_object_into_sidecar(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as toolkit,
+            tempfile.TemporaryDirectory() as source_dir,
+        ):
+            self._fake_toolkit(toolkit, supports=True)
+            kernel_obj_files = [
+                os.path.join(source_dir, f"{_KERNEL_NAME}__{tag}.o")
+                for tag in ("aaaa", "bbbb")
+            ]
+            for name in (
+                *kernel_obj_files,
+                os.path.join(source_dir, f"{_KERNEL_NAME}_entry.cpp"),
+                os.path.join(source_dir, f"{_KERNEL_NAME}_torch_op.cpp"),
+            ):
+                with open(name, "w"):
+                    pass
+            ext_name = _KERNEL_NAME.lstrip("_")
+            builder = CutedslExtensionBuilder(
+                source_dir=source_dir,
+                kernel_name=_KERNEL_NAME,
+                output_dir=source_dir,
+                kernel_obj_files=kernel_obj_files,
+                build_config=ExtensionBuildConfig(gpu_toolkit_path=toolkit),
+            )
+            with (
+                mock.patch.object(
+                    extension_builder_base.cpp_extension,
+                    "include_paths",
+                    return_value=[],
+                ),
+                mock.patch.object(
+                    extension_builder,
+                    "setup",
+                    side_effect=functools.partial(
+                        self._write_build_outputs,
+                        source_dir,
+                        (ext_name, f"{ext_name}_cutedsl_impl"),
+                    ),
+                ) as setup,
+            ):
+                builder.build()
+
+        sidecar, torch_op = setup.call_args.kwargs["ext_modules"]
+        self.assertEqual(sidecar.extra_objects, kernel_obj_files)
+        self.assertFalse(torch_op.extra_objects)
+
     def test_build_raises_when_generated_source_is_missing(self) -> None:
+        symbol = f"{_KERNEL_NAME}__aaaa"
         artifacts = (
-            (f"{_KERNEL_NAME}.h", "CuTe header not found"),
-            (f"{_KERNEL_NAME}.o", "CuTe object not found"),
+            (f"{symbol}.o", "CuTe object not found"),
             (f"{_KERNEL_NAME}_entry.cpp", "CuTe entry source not found"),
             (f"{_KERNEL_NAME}_torch_op.cpp", "CuTe torch op source not found"),
         )
@@ -139,10 +190,23 @@ class CutedslExtensionBuilderTest(unittest.TestCase):
                     builder = CutedslExtensionBuilder(
                         source_dir=source_dir,
                         kernel_name=_KERNEL_NAME,
+                        output_dir=source_dir,
+                        kernel_obj_files=[os.path.join(source_dir, f"{symbol}.o")],
                         build_config=ExtensionBuildConfig(gpu_toolkit_path=source_dir),
                     )
                     with self.assertRaisesRegex(AssertionError, expected_error):
                         builder.build()
+
+    def test_build_raises_without_kernel_obj_files(self) -> None:
+        builder = CutedslExtensionBuilder(
+            source_dir=self.source_dir,
+            kernel_name=_KERNEL_NAME,
+            output_dir=self.source_dir,
+            kernel_obj_files=[],
+            build_config=ExtensionBuildConfig(gpu_toolkit_path=self.source_dir),
+        )
+        with self.assertRaisesRegex(AssertionError, "at least one kernel object"):
+            builder.build()
 
     def test_build_raises_when_expected_output_is_missing(self) -> None:
         ext_name = _KERNEL_NAME.lstrip("_")
@@ -161,6 +225,7 @@ class CutedslExtensionBuilderTest(unittest.TestCase):
                         source_dir=self.source_dir,
                         kernel_name=_KERNEL_NAME,
                         output_dir=output_dir,
+                        kernel_obj_files=self.kernel_obj_files,
                         build_config=ExtensionBuildConfig(gpu_toolkit_path=toolkit),
                     )
                     with (
@@ -194,6 +259,7 @@ class CutedslExtensionBuilderTest(unittest.TestCase):
                 source_dir=self.source_dir,
                 kernel_name=_KERNEL_NAME,
                 output_dir=output_dir,
+                kernel_obj_files=self.kernel_obj_files,
                 build_config=ExtensionBuildConfig(gpu_toolkit_path=bad),
             )
             ext_name = _KERNEL_NAME.lstrip("_")
@@ -229,6 +295,8 @@ class CutedslExtensionBuilderTest(unittest.TestCase):
             builder = CutedslExtensionBuilder(
                 source_dir=self.source_dir,
                 kernel_name=_KERNEL_NAME,
+                output_dir=bad,
+                kernel_obj_files=self.kernel_obj_files,
                 build_config=ExtensionBuildConfig(gpu_toolkit_path=bad),
             )
             with (
@@ -261,6 +329,7 @@ class BuildCutedslAotExtensionTest(unittest.TestCase):
                     source_dir="/source",
                     kernel_name="_kernel",
                     output_dir="/output",
+                    kernel_obj_files=["/source/_kernel__aaaa.o"],
                 )
 
         builder.assert_not_called()
@@ -279,6 +348,7 @@ class BuildCutedslAotExtensionTest(unittest.TestCase):
                 source_dir="/source",
                 kernel_name="_kernel",
                 output_dir="/output",
+                kernel_obj_files=["/source/_kernel__aaaa.o"],
                 build_config=build_config,
             )
 
@@ -287,6 +357,7 @@ class BuildCutedslAotExtensionTest(unittest.TestCase):
             "/source",
             "_kernel",
             "/output",
+            ["/source/_kernel__aaaa.o"],
             build_config=build_config,
         )
         builder.return_value.build.assert_called_once_with()

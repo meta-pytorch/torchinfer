@@ -17,7 +17,6 @@ from typing import Any, Callable, Generic, TypeVar
 import torch
 from aot_tensor.arg_specs.common import ConstexprArg, ScalarArg
 from aot_tensor.arg_specs.cute import CuTeArgSpec, CuTeTensorArg
-from aot_tensor.compile.stable_types import TORCH_DTYPE_TO_STABLE
 
 _C_IDENTIFIER: re.Pattern[str] = re.compile(r"^[A-Za-z_]\w*$")
 
@@ -35,8 +34,9 @@ class ScalarDtype:
 
 
 _SCALAR_DTYPES: dict[str, ScalarDtype] = {
+    # cutedsl_i32 (templates/cutedsl_torch_op.cpp) throws instead of wrapping.
     "i32": ScalarDtype(
-        "int64_t", "int32_t", "int", "static_cast<int32_t>({name})", int, "Int32"
+        "int64_t", "int32_t", "int", 'cutedsl_i32({name}, "{name}")', int, "Int32"
     ),
     "i64": ScalarDtype(
         "int64_t", "int64_t", "int", "static_cast<int64_t>({name})", int, "Int64"
@@ -61,14 +61,6 @@ def _check_c_identifier(name: str, what: str) -> None:
 def _quote_cpp_string(value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
-
-
-def _format_constexpr_value(value: Any) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, str):
-        return _quote_cpp_string(value)
-    return repr(value)
 
 
 def cute_scalar(value: Any, dtype: str) -> Any:
@@ -198,10 +190,6 @@ class ArgCodegen(Generic[_SpecT]):
     def wrapper_arg(self) -> str | None:
         return None
 
-    # --- runtime guard emitted into the torch op body ("" = none) ---
-    def guard(self, op_name: str, value: Any) -> str:
-        return ""
-
     # --- cute.compile arg from a sampled runtime value ---
     def cute_arg(self, value: Any) -> Any:
         raise NotImplementedError
@@ -269,17 +257,6 @@ class TensorCodegen(ArgCodegen[CuTeTensorArg]):
     def wrapper_arg(self) -> str | None:
         return f"&{self.name}_t"
 
-    def guard(self, op_name: str, value: Any) -> str:
-        dtype = str(value.dtype)
-        stable_dtype = TORCH_DTYPE_TO_STABLE.get(dtype)
-        if stable_dtype is None:
-            raise RuntimeError(f"CuTeAOT {op_name}: unsupported tensor dtype {dtype}.")
-        return f"""
-            if ({self.name}.scalar_type() != {stable_dtype}) {{
-                throw std::runtime_error("CuTeAOT {op_name}: unexpected dtype for {self.name}");
-            }}
-            """
-
     def cute_arg(self, value: Any) -> Any:
         # Lazy import: CuTe compile path only (keep CuTeDSL off the import path).
         from cutlass.cute.runtime import from_dlpack  # @manual
@@ -328,16 +305,6 @@ class ScalarCodegen(ArgCodegen[ScalarArg]):
     def wrapper_arg(self) -> str | None:
         return self.name
 
-    def guard(self, op_name: str, value: Any) -> str:
-        if self.spec.dtype != "i32":
-            return ""
-        return f"""
-          if ({self.name} < std::numeric_limits<int32_t>::min() ||
-              {self.name} > std::numeric_limits<int32_t>::max()) {{
-            throw std::runtime_error("CuTeAOT {op_name}: scalar {self.name} does not fit i32");
-          }}
-"""
-
     def cute_arg(self, value: Any) -> Any:
         return cute_scalar(value, self.spec.dtype)
 
@@ -376,14 +343,6 @@ class ConstexprCodegen(ArgCodegen[ConstexprArg]):
 
     def torch_schema_param(self, index: int) -> str:
         return f"{self._schema_type()} {self.name}"
-
-    def guard(self, op_name: str, value: Any) -> str:
-        expected = _format_constexpr_value(value)
-        return f"""
-          if ({self.name} != {expected}) {{
-            throw std::runtime_error("CuTeAOT {op_name}: unsupported constexpr value for {self.name}");
-          }}
-"""
 
     def cute_arg(self, value: Any) -> Any:
         return value
@@ -443,10 +402,8 @@ def tensor_struct_fields(
     }
 
 
-def validate_cutedsl_op(
-    codegens: list[ArgCodegen[Any]], op_name: str, prefix: str
-) -> None:
-    _check_c_identifier(prefix, "prefix")
+def validate_cutedsl_op(codegens: list[ArgCodegen[Any]], op_name: str) -> None:
+    # Variant symbols (``{op_name}__{hash}``) are valid whenever op_name is.
     _check_c_identifier(op_name, "op name")
     for cg in codegens:
         _check_c_identifier(cg.name, "arg name")

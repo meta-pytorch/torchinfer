@@ -38,14 +38,13 @@ class CutedslTemplateTest(unittest.TestCase):
         torch_op = CUTEDSL_TEMPLATES.load("cutedsl_torch_op.cpp")
 
         # GENERATE regions the codegen renders.
-        for key in ("OP_NAME", "ENTRY_TYPE", "OP_FN"):
+        for key in ("OP_NAME", "OP_FN"):
             self.assertIn(f"// __CUTEDSL_AOT_GENERATE_BEGIN__ {key}", torch_op)
             self.assertIn(f"// __CUTEDSL_AOT_GENERATE_END__ {key}", torch_op)
 
         # Per-op values reach the static code through macros.
         self.assertIn("CUTEDSL_OP_NAMESPACE", torch_op)
         self.assertIn("CUTEDSL_OP_NAME", torch_op)
-        self.assertIn("CUTEDSL_ENTRY_SYMBOL", torch_op)
         self.assertIn("CUTEDSL_SIDECAR_NAME", torch_op)
         self.assertIn("CUTEDSL_OP_SCHEMA", torch_op)
 
@@ -60,5 +59,8 @@ class CutedslTemplateTest(unittest.TestCase):
         self.assertIn("dladdr", torch_op)
         self.assertIn("cutedsl_sidecar_path", torch_op)
         self.assertIn("cutedsl_load_entry", torch_op)
+        # The variant selector's no-match handler and the checked i32 narrowing.
+        self.assertIn("cutedsl_fail", torch_op)
+        self.assertIn("cutedsl_i32", torch_op)
         # Sidecar resolved relative to this .so, never an absolute build path.
         self.assertNotIn("/tmp", torch_op)

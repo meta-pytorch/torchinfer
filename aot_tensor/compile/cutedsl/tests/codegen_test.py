@@ -6,24 +6,25 @@
 
 These cover the per-arg codegen adapters (tensor / scalar / constexpr), the
 header-driven tensor ABI (contiguous vs non-contiguous structs), the torch-op
-surface (params / schema / guards), and validation — without a GPU or a real
-CuTeDSL compile.
+surface (params / schema / variant selector), and validation — without
+a GPU or a real CuTeDSL compile.
 """
 
+import os
 import sys
 import tempfile
 import types as pytypes
 import unittest
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
-from aot_tensor.arg_specs.common import ConstexprArg, ScalarArg
+from aot_tensor.arg_specs.common import ConstexprArg, RawSpec, ScalarArg
 from aot_tensor.arg_specs.cute import CuTeTensorArg
 from aot_tensor.compile.cutedsl import pipeline as cutedsl_mod
 from aot_tensor.compile.cutedsl.codegen import (
     _entry_args,
     _entry_struct_builds,
-    _format_constexpr_value,
     _SCALAR_DTYPES,
     ArgCodegen,
     ConstexprCodegen,
@@ -36,9 +37,11 @@ from aot_tensor.compile.cutedsl.codegen import (
 )
 from aot_tensor.compile.cutedsl.pipeline import (
     compile_cutedsl_to_cpp,
+    CuTeVariant,
     generate_sidecar_entry_content,
     generate_torch_op_content,
 )
+from aot_tensor.compile.spec_selector import Variant
 from aot_tensor.constants import DEFAULT_OP_NAMESPACE_PREFIX
 from parameterized import parameterized
 
@@ -104,7 +107,7 @@ class EntryAbiConsistencyTest(unittest.TestCase):
         )
         self.assertEqual(
             [a.call for a in args],
-            ["x.data_ptr()", "x.sizes().data()", "static_cast<int32_t>(n)"],
+            ["x.data_ptr()", "x.sizes().data()", 'cutedsl_i32(n, "n")'],
         )
 
     def test_non_contiguous_tensor_includes_strides(self) -> None:
@@ -212,29 +215,6 @@ class TorchParamTest(unittest.TestCase):
             cg.torch_schema_param(0)
 
 
-class GuardTest(unittest.TestCase):
-    def test_tensor_dtype_guard(self) -> None:
-        cg = make_codegen(CuTeTensorArg("x"))
-        out = cg.guard("op", SimpleNamespace(dtype="torch.float32"))
-        self.assertIn("x.scalar_type() != torch::headeronly::ScalarType::Float", out)
-
-    def test_tensor_unsupported_dtype_raises(self) -> None:
-        cg = make_codegen(CuTeTensorArg("x"))
-        with self.assertRaises(RuntimeError):
-            cg.guard("op", SimpleNamespace(dtype="torch.complex64"))
-
-    def test_scalar_i32_range_guard(self) -> None:
-        cg = make_codegen(ScalarArg("n", "i32"))
-        self.assertIn("std::numeric_limits<int32_t>", cg.guard("op", 0))
-
-    def test_scalar_non_i32_has_no_guard(self) -> None:
-        self.assertEqual(make_codegen(ScalarArg("n", "i64")).guard("op", 0), "")
-
-    def test_constexpr_value_guard(self) -> None:
-        out = make_codegen(ConstexprArg("flag", bool)).guard("op", True)
-        self.assertIn("flag != true", out)
-
-
 class ConstexprCodegenTest(unittest.TestCase):
     def test_not_runtime_contributes_nothing_to_entry(self) -> None:
         cg = make_codegen(ConstexprArg("flag", bool))
@@ -257,17 +237,16 @@ class ValidateTest(unittest.TestCase):
                     make_codegen(ScalarArg("n", "i32")),
                 ],
                 "op",
-                _PREFIX,
             )
         )
 
     def test_bad_scalar_dtype_raises(self) -> None:
         with self.assertRaises(RuntimeError):
-            validate_cutedsl_op([make_codegen(ScalarArg("n", "f16"))], "op", _PREFIX)
+            validate_cutedsl_op([make_codegen(ScalarArg("n", "f16"))], "op")
 
     def test_bad_identifier_raises(self) -> None:
         with self.assertRaises(RuntimeError):
-            validate_cutedsl_op([], "op", "bad-prefix")
+            validate_cutedsl_op([], "bad-op")
 
 
 class ScalarDtypeTableTest(unittest.TestCase):
@@ -300,76 +279,62 @@ class ScalarDtypeTableTest(unittest.TestCase):
             cute_scalar(1, "f16")
 
 
+def _variant(symbol: str, condition: str, fields: dict[str, Any]) -> CuTeVariant:
+    return CuTeVariant(Variant(symbol, condition, f"{symbol} signature"), fields)
+
+
+_F32 = _variant("op__aaaa", "x.scalar_type() == F32", {"x": (2, 0)})
+# Non-contiguous: its entry takes strides too.
+_F16 = _variant("op__bbbb", "x.scalar_type() == F16", {"x": (2, 2)})
+
+
 class GenerateContentTest(unittest.TestCase):
-    """Exercise the full sidecar/torch-op string generators (CPU, no compile)."""
+    """Render both shims for two variants (CPU, no compile)."""
 
-    def test_sidecar_entry_content(self) -> None:
-        codegens = [
-            make_codegen(CuTeTensorArg("x")),
-            make_codegen(ScalarArg("n", "i32")),
-        ]
-        out = generate_sidecar_entry_content("op", codegens, "pfx", {"x": (2, 0)})
-        self.assertIn("int32_t pfx_entry(", out)
-        self.assertIn("void* x_data", out)
-        self.assertIn("int32_t n", out)
-        self.assertIn("cute_dsl_pfx_wrapper(&module,", out)
-        self.assertIn('#include "pfx.h"', out)
-        # The op name is rendered into the OP_NAME region; the static cudart
-        # shims come verbatim from the template into the rendered output.
+    _codegens: list[ArgCodegen[Any]] = [
+        make_codegen(CuTeTensorArg("x")),
+        make_codegen(ScalarArg("n", "i32")),
+    ]
+
+    def test_sidecar_entry(self) -> None:
+        out = generate_sidecar_entry_content("op", self._codegens, [_F32, _F16])
         self.assertIn('#define CUTEDSL_OP_NAME "op"', out)
-        self.assertIn("cudaLibraryLoadData", out)
-        self.assertIn("cutedsl_cudart_symbol", out)
+        self.assertIn('#include "op__aaaa.h"\n#include "op__bbbb.h"', out)
+        for symbol in ("op__aaaa", "op__bbbb"):
+            self.assertIn(f"int32_t {symbol}_entry(void* x_data", out)
+            self.assertIn(f"{symbol}_Tensor_x_t x_t;", out)
+            self.assertIn(f"cute_dsl_{symbol}_wrapper(&module,", out)
+        # Only the non-contiguous variant's entry takes strides.
+        self.assertEqual(out.count("const int64_t* x_strides"), 1)
 
-    def test_torch_op_content(self) -> None:
-        codegens = [
-            make_codegen(CuTeTensorArg("x")),
-            make_codegen(ScalarArg("n", "i32")),
-        ]
-        values = {"x": SimpleNamespace(dtype="torch.float32"), "n": 0}
-        out = generate_torch_op_content(
-            "op", codegens, values, "pfx", "impl.so", {"x": (2, 0)}
-        )
-        self.assertIn("m.def(CUTEDSL_OP_SCHEMA)", out)
-        self.assertIn('#define CUTEDSL_OP_SCHEMA "op(', out)
-        self.assertIn("torch::stable::Tensor x", out)
+    def test_torch_op(self) -> None:
+        out = generate_torch_op_content("op", self._codegens, [_F32, _F16], "impl.so")
         self.assertIn(
             f"#define CUTEDSL_OP_NAMESPACE {DEFAULT_OP_NAMESPACE_PREFIX}\n", out
         )
-        self.assertIn("STABLE_TORCH_LIBRARY_IMPL(CUTEDSL_OP_NAMESPACE, CUDA, m)", out)
-        self.assertIn("m.impl(CUTEDSL_OP_NAME, TORCH_BOX(&cutedsl_op))", out)
-        # Per-op name/symbol/sidecar are rendered into the OP_NAME macro region;
-        # the static dladdr loader comes verbatim from the template. Only the
-        # basename is baked in (no absolute build path).
-        self.assertIn('#define CUTEDSL_OP_NAME "op"', out)
-        self.assertIn('#define CUTEDSL_ENTRY_SYMBOL "pfx_entry"', out)
+        self.assertIn('#define CUTEDSL_OP_SCHEMA "op(Tensor(a!) x, int n) -> ()"', out)
         self.assertIn('#define CUTEDSL_SIDECAR_NAME "impl.so"', out)
-        self.assertIn("dladdr", out)
-        self.assertNotIn("/tmp", out)
-        self.assertIn("unexpected dtype for x", out)
-
-    def test_torch_op_content_with_constexpr(self) -> None:
-        codegens = [
-            make_codegen(CuTeTensorArg("x")),
-            make_codegen(ConstexprArg("flag", bool)),
-        ]
-        values = {"x": SimpleNamespace(dtype="torch.float32"), "flag": True}
-        out = generate_torch_op_content(
-            "op", codegens, values, "pfx", "impl.so", {"x": (2, 0)}
+        for symbol in ("op__aaaa", "op__bbbb"):
+            self.assertIn(f"void {symbol}_run(torch::stable::Tensor x, int64_t n)", out)
+            self.assertIn(f'cutedsl_load_entry<EntryFn>("{symbol}_entry")', out)
+        # Each run function calls its own variant's entry ABI.
+        self.assertIn(
+            "using EntryFn = int32_t (*)(void*, const int64_t*, int32_t, CUstream);",
+            out,
         )
-        self.assertIn("bool flag", out)
-        self.assertIn("flag != true", out)
-
-
-class FormatConstexprValueTest(unittest.TestCase):
-    def test_bool(self) -> None:
-        self.assertEqual(_format_constexpr_value(True), "true")
-        self.assertEqual(_format_constexpr_value(False), "false")
-
-    def test_str_is_quoted(self) -> None:
-        self.assertEqual(_format_constexpr_value("abc"), '"abc"')
-
-    def test_number(self) -> None:
-        self.assertEqual(_format_constexpr_value(7), "7")
+        self.assertIn(
+            "using EntryFn = int32_t (*)(void*, const int64_t*, const int64_t*, "
+            "int32_t, CUstream);",
+            out,
+        )
+        self.assertIn('cutedsl_i32(n, "n")', out)
+        self.assertIn("if (x.scalar_type() == F32) {\n    op__aaaa_run(x, n);", out)
+        self.assertIn("if (x.scalar_type() == F16) {\n    op__bbbb_run(x, n);", out)
+        self.assertIn(
+            'cutedsl_fail("no compiled specialization matches the arguments; '
+            'compiled: op__aaaa signature; op__bbbb signature");',
+            out,
+        )
 
 
 class ArgCodegenBaseTest(unittest.TestCase):
@@ -381,7 +346,6 @@ class ArgCodegenBaseTest(unittest.TestCase):
         self.assertEqual(cg.entry_args({}), [])
         self.assertEqual(cg.struct_build_lines("pfx", {}), [])
         self.assertIsNone(cg.wrapper_arg())
-        self.assertEqual(cg.guard("op", None), "")
         self.assertIsNone(cg.validate("op"))
 
     def test_abstract_hooks_raise(self) -> None:
@@ -394,27 +358,67 @@ class ArgCodegenBaseTest(unittest.TestCase):
             cg.cute_arg(1)
 
 
-class CompileCuTeDSLToCppTest(unittest.TestCase):
-    """Orchestrator path up to cute.compile, with cutlass + stream glue stubbed.
+def _vector_add_spec(x: str, dtype: str, aligned16: bool = True) -> RawSpec:
+    return RawSpec(
+        runtime_args=(x, 4),
+        runtime_kwargs={},
+        hash_key={
+            "name": "_cutedsl_vector_add",
+            "jit_module": "toy",
+            "args": [
+                {
+                    "name": "x",
+                    "tensor": {
+                        "dtype": dtype,
+                        "dim": 1,
+                        "leading_dim": 0,
+                        "aligned16": aligned16,
+                    },
+                },
+                {"name": "n", "scalar": {"dtype": "i32"}},
+            ],
+        },
+    )
 
-    Exercises resolve_runtime_args + build_cute_call_args wiring on CPU; the real
-    cute.compile/export_to_c are GPU-only and covered by the E2E test.
+
+class _FakeCompiled:
+    """Stands in for ``cute.compile``'s result: ``export_to_c`` writes the
+    ``{symbol}.h`` / ``{symbol}.o`` pair the pipeline reads and links."""
+
+    def export_to_c(self, install_dir: str, symbol: str) -> None:
+        with open(os.path.join(install_dir, f"{symbol}.h"), "w") as fp:
+            fp.write(
+                "typedef struct { void* data; int32_t dynamic_shapes[1]; } "
+                f"{symbol}_Tensor_x_t;\n"
+            )
+        with open(os.path.join(install_dir, f"{symbol}.o"), "w") as fp:
+            fp.write("")
+
+
+class CompileCuTeDSLToCppTest(unittest.TestCase):
+    """Orchestrator path with cutlass + stream glue stubbed.
+
+    Exercises resolve_runtime_args + build_cute_call_args wiring and the
+    per-variant export on CPU; the real cute.compile/export_to_c are GPU-only
+    and covered by the E2E test.
     """
 
-    def test_builds_cute_args_then_calls_compile(self) -> None:
-        class _StopAtCompile(Exception):
-            pass
-
+    def test_exports_one_object_per_distinct_specialization(self) -> None:
         op = SimpleNamespace(
             name="_cutedsl_vector_add",
             arg_specs=[CuTeTensorArg("x"), ScalarArg("n", "i32")],
             jit_fn=lambda *a: None,
         )
-        spec = SimpleNamespace(runtime_args=("X", 4), runtime_kwargs={})
+        specs = [
+            _vector_add_spec("X32", "torch.float32"),
+            _vector_add_spec("X16", "torch.float16"),
+            # Differs only in the sample's alignment: same compiled code.
+            _vector_add_spec("X32u", "torch.float32", aligned16=False),
+        ]
 
         fake_cute = pytypes.ModuleType("cutlass.cute")
         # pyre-ignore[16]: attaching a stub attribute to a fake module.
-        fake_cute.compile = MagicMock(side_effect=_StopAtCompile)
+        fake_cute.compile = MagicMock(return_value=_FakeCompiled())
         fake_cutlass = pytypes.ModuleType("cutlass")
         # pyre-ignore[16]
         fake_cutlass.cute = fake_cute
@@ -431,12 +435,37 @@ class CompileCuTeDSLToCppTest(unittest.TestCase):
                 },
             ),
             patch.object(
-                cutedsl_mod, "build_cute_call_args", return_value=("cute_arg",)
-            ) as build_args,
+                cutedsl_mod,
+                "build_cute_call_args",
+                side_effect=lambda arg_specs, values: (values["x"],),
+            ),
         ):
-            with self.assertRaises(_StopAtCompile):
-                # pyre-ignore[6]: op/specs are minimal stubs for this codegen path.
-                compile_cutedsl_to_cpp(op, [spec], install_dir, "_cutedsl_vector_add")
+            # pyre-ignore[6]: op is a minimal stub for this codegen path.
+            kernel_obj_files = compile_cutedsl_to_cpp(op, specs, install_dir)
 
-        build_args.assert_called_once_with(op.arg_specs, {"x": "X", "n": 4})
-        fake_cute.compile.assert_called_once_with(op.jit_fn, "cute_arg")
+            symbols = [
+                os.path.splitext(os.path.basename(o))[0] for o in kernel_obj_files
+            ]
+            self.assertEqual(len(symbols), 2)
+            for obj in kernel_obj_files:
+                self.assertTrue(os.path.exists(obj))
+            with open(os.path.join(install_dir, f"{op.name}_entry.cpp")) as fp:
+                entry = fp.read()
+            with open(os.path.join(install_dir, f"{op.name}_torch_op.cpp")) as fp:
+                torch_op = fp.read()
+
+        self.assertEqual(
+            [c.args for c in fake_cute.compile.call_args_list],
+            [(op.jit_fn, "X32"), (op.jit_fn, "X16")],
+        )
+        for symbol in symbols:
+            self.assertTrue(symbol.startswith("_cutedsl_vector_add__"))
+            self.assertIn(f"int32_t {symbol}_entry(", entry)
+            self.assertIn(f"{symbol}_run(x, n);", torch_op)
+        self.assertIn(
+            '#define CUTEDSL_SIDECAR_NAME "cutedsl_vector_add_cutedsl_impl.so"',
+            torch_op,
+        )
+        self.assertIn(
+            "x.scalar_type() == torch::headeronly::ScalarType::Half", torch_op
+        )

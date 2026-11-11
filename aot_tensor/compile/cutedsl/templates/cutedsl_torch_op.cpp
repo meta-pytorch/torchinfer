@@ -17,16 +17,24 @@
 // __CUTEDSL_AOT_GENERATE_BEGIN__ OP_NAME
 #define CUTEDSL_OP_NAMESPACE placeholder
 #define CUTEDSL_OP_NAME "placeholder"
-#define CUTEDSL_ENTRY_SYMBOL "placeholder_entry"
 #define CUTEDSL_SIDECAR_NAME "placeholder_cutedsl_impl.so"
 #define CUTEDSL_OP_SCHEMA "placeholder(Tensor x) -> ()"
 // __CUTEDSL_AOT_GENERATE_END__ OP_NAME
 
 namespace {
 
-// __CUTEDSL_AOT_GENERATE_BEGIN__ ENTRY_TYPE
-using EntryFn = int32_t (*)(void*);
-// __CUTEDSL_AOT_GENERATE_END__ ENTRY_TYPE
+[[noreturn]] void cutedsl_fail(const std::string& message) {
+  throw std::runtime_error("CuTeAOT " CUTEDSL_OP_NAME ": " + message);
+}
+
+// An i32 scalar arrives as int64_t; narrowing must not silently wrap.
+int32_t cutedsl_i32(int64_t value, const char* name) {
+  if (value < std::numeric_limits<int32_t>::min() ||
+      value > std::numeric_limits<int32_t>::max()) {
+    cutedsl_fail(std::string("scalar ") + name + " does not fit i32");
+  }
+  return static_cast<int32_t>(value);
+}
 
 CUstream cutedsl_aot_get_current_stream() {
   auto device_idx = torch::stable::accelerator::getCurrentDeviceIndex();
@@ -55,27 +63,34 @@ std::string cutedsl_sidecar_path() {
   return dir + "/" + CUTEDSL_SIDECAR_NAME;
 }
 
-EntryFn cutedsl_load_entry() {
-  static EntryFn fn = []() -> EntryFn {
+void* cutedsl_sidecar_handle() {
+  static void* handle = []() -> void* {
     std::string sidecar_path = cutedsl_sidecar_path();
-    void* handle = dlopen(sidecar_path.c_str(), RTLD_NOW | RTLD_LOCAL);
-    if (handle == nullptr) {
+    void* loaded = dlopen(sidecar_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (loaded == nullptr) {
       const char* err = dlerror();
       throw std::runtime_error(
           std::string("CuTeAOT " CUTEDSL_OP_NAME ": dlopen(") + sidecar_path +
           ") failed: " + (err == nullptr ? "unknown" : err));
     }
-    dlerror();
-    void* sym = dlsym(handle, CUTEDSL_ENTRY_SYMBOL);
-    const char* err = dlerror();
-    if (err != nullptr || sym == nullptr) {
-      throw std::runtime_error(
-          std::string("CuTeAOT " CUTEDSL_OP_NAME ": dlsym failed: ") +
-          (err == nullptr ? "unknown" : err));
-    }
-    return reinterpret_cast<EntryFn>(sym);
+    return loaded;
   }();
-  return fn;
+  return handle;
+}
+
+// One sidecar entry per variant; each run function caches its own lookup.
+template <typename Fn>
+Fn cutedsl_load_entry(const char* symbol) {
+  void* handle = cutedsl_sidecar_handle();
+  dlerror();
+  void* sym = dlsym(handle, symbol);
+  const char* err = dlerror();
+  if (err != nullptr || sym == nullptr) {
+    throw std::runtime_error(
+        std::string("CuTeAOT " CUTEDSL_OP_NAME ": dlsym(") + symbol +
+        ") failed: " + (err == nullptr ? "unknown" : err));
+  }
+  return reinterpret_cast<Fn>(sym);
 }
 
 // __CUTEDSL_AOT_GENERATE_BEGIN__ OP_FN

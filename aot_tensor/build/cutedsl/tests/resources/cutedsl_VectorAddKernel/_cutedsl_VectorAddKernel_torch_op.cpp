@@ -17,17 +17,26 @@
 #include <string>
 
 // __CUTEDSL_AOT_GENERATE_BEGIN__ OP_NAME
+#define CUTEDSL_OP_NAMESPACE aot_tensor
 #define CUTEDSL_OP_NAME "_cutedsl_VectorAddKernel"
-#define CUTEDSL_ENTRY_SYMBOL "_cutedsl_VectorAddKernel_entry"
 #define CUTEDSL_SIDECAR_NAME "cutedsl_VectorAddKernel_cutedsl_impl.so"
 #define CUTEDSL_OP_SCHEMA "_cutedsl_VectorAddKernel(Tensor(a!) x, Tensor(b!) y, Tensor(c!) out, int n) -> ()"
 // __CUTEDSL_AOT_GENERATE_END__ OP_NAME
 
 namespace {
 
-// __CUTEDSL_AOT_GENERATE_BEGIN__ ENTRY_TYPE
-using EntryFn = int32_t (*)(void*, const int64_t*, void*, const int64_t*, void*, const int64_t*, int32_t, CUstream);
-// __CUTEDSL_AOT_GENERATE_END__ ENTRY_TYPE
+[[noreturn]] void cutedsl_fail(const std::string& message) {
+  throw std::runtime_error("CuTeAOT " CUTEDSL_OP_NAME ": " + message);
+}
+
+// An i32 scalar arrives as int64_t; narrowing must not silently wrap.
+int32_t cutedsl_i32(int64_t value, const char* name) {
+  if (value < std::numeric_limits<int32_t>::min() ||
+      value > std::numeric_limits<int32_t>::max()) {
+    cutedsl_fail(std::string("scalar ") + name + " does not fit i32");
+  }
+  return static_cast<int32_t>(value);
+}
 
 CUstream cutedsl_aot_get_current_stream() {
   auto device_idx = torch::stable::accelerator::getCurrentDeviceIndex();
@@ -56,49 +65,53 @@ std::string cutedsl_sidecar_path() {
   return dir + "/" + CUTEDSL_SIDECAR_NAME;
 }
 
-EntryFn cutedsl_load_entry() {
-  static EntryFn fn = []() -> EntryFn {
+void* cutedsl_sidecar_handle() {
+  static void* handle = []() -> void* {
     std::string sidecar_path = cutedsl_sidecar_path();
-    void* handle = dlopen(sidecar_path.c_str(), RTLD_NOW | RTLD_LOCAL);
-    if (handle == nullptr) {
+    void* loaded = dlopen(sidecar_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (loaded == nullptr) {
       const char* err = dlerror();
       throw std::runtime_error(
           std::string("CuTeAOT " CUTEDSL_OP_NAME ": dlopen(") + sidecar_path +
           ") failed: " + (err == nullptr ? "unknown" : err));
     }
-    dlerror();
-    void* sym = dlsym(handle, CUTEDSL_ENTRY_SYMBOL);
-    const char* err = dlerror();
-    if (err != nullptr || sym == nullptr) {
-      throw std::runtime_error(
-          std::string("CuTeAOT " CUTEDSL_OP_NAME ": dlsym failed: ") +
-          (err == nullptr ? "unknown" : err));
-    }
-    return reinterpret_cast<EntryFn>(sym);
+    return loaded;
   }();
-  return fn;
+  return handle;
+}
+
+// One sidecar entry per variant; each run function caches its own lookup.
+template <typename Fn>
+Fn cutedsl_load_entry(const char* symbol) {
+  void* handle = cutedsl_sidecar_handle();
+  dlerror();
+  void* sym = dlsym(handle, symbol);
+  const char* err = dlerror();
+  if (err != nullptr || sym == nullptr) {
+    throw std::runtime_error(
+        std::string("CuTeAOT " CUTEDSL_OP_NAME ": dlsym(") + symbol +
+        ") failed: " + (err == nullptr ? "unknown" : err));
+  }
+  return reinterpret_cast<Fn>(sym);
 }
 
 // __CUTEDSL_AOT_GENERATE_BEGIN__ OP_FN
-void cutedsl_op(torch::stable::Tensor x, torch::stable::Tensor y, torch::stable::Tensor out, int64_t n) {
-  if (x.scalar_type() != torch::headeronly::ScalarType::Float) {
-      throw std::runtime_error("CuTeAOT _cutedsl_VectorAddKernel: unexpected dtype for x");
-  }
-  if (y.scalar_type() != torch::headeronly::ScalarType::Float) {
-      throw std::runtime_error("CuTeAOT _cutedsl_VectorAddKernel: unexpected dtype for y");
-  }
-  if (out.scalar_type() != torch::headeronly::ScalarType::Float) {
-      throw std::runtime_error("CuTeAOT _cutedsl_VectorAddKernel: unexpected dtype for out");
-  }
-  if (n < std::numeric_limits<int32_t>::min() ||
-      n > std::numeric_limits<int32_t>::max()) {
-    throw std::runtime_error("CuTeAOT _cutedsl_VectorAddKernel: scalar n does not fit i32");
-  }
+void _cutedsl_VectorAddKernel__11c4c622_run(torch::stable::Tensor x, torch::stable::Tensor y, torch::stable::Tensor out, int64_t n) {
+  using EntryFn = int32_t (*)(void*, const int64_t*, void*, const int64_t*, void*, const int64_t*, int32_t, CUstream);
+  static EntryFn entry = cutedsl_load_entry<EntryFn>("_cutedsl_VectorAddKernel__11c4c622_entry");
   CUstream stream = cutedsl_aot_get_current_stream();
-  int32_t result = cutedsl_load_entry()(x.data_ptr(), x.sizes().data(), y.data_ptr(), y.sizes().data(), out.data_ptr(), out.sizes().data(), static_cast<int32_t>(n), stream);
+  int32_t result = entry(x.data_ptr(), x.sizes().data(), y.data_ptr(), y.sizes().data(), out.data_ptr(), out.sizes().data(), cutedsl_i32(n, "n"), stream);
   if (result != 0) {
     throw std::runtime_error("CuTeAOT _cutedsl_VectorAddKernel: generated sidecar returned CUDA error " + std::to_string(result));
   }
+}
+
+void cutedsl_op(torch::stable::Tensor x, torch::stable::Tensor y, torch::stable::Tensor out, int64_t n) {
+  if (x.scalar_type() == torch::headeronly::ScalarType::Float && x.dim() == 1 && x.stride(0) == 1 && y.scalar_type() == torch::headeronly::ScalarType::Float && y.dim() == 1 && y.stride(0) == 1 && out.scalar_type() == torch::headeronly::ScalarType::Float && out.dim() == 1 && out.stride(0) == 1) {
+    _cutedsl_VectorAddKernel__11c4c622_run(x, y, out, n);
+    return;
+  }
+  cutedsl_fail("no compiled specialization matches the arguments; compiled: x: torch.float32 rank 1 unit-stride dim 0, y: torch.float32 rank 1 unit-stride dim 0, out: torch.float32 rank 1 unit-stride dim 0");
 }
 
 void cutedsl_dummy_op(torch::stable::Tensor x, torch::stable::Tensor y, torch::stable::Tensor out, int64_t n) {}
@@ -106,18 +119,18 @@ void cutedsl_dummy_op(torch::stable::Tensor x, torch::stable::Tensor y, torch::s
 
 } // namespace
 
-STABLE_TORCH_LIBRARY_FRAGMENT(triton_aot, m) {
+STABLE_TORCH_LIBRARY_FRAGMENT(CUTEDSL_OP_NAMESPACE, m) {
   m.def(CUTEDSL_OP_SCHEMA);
 }
 
-STABLE_TORCH_LIBRARY_IMPL(triton_aot, CUDA, m) {
+STABLE_TORCH_LIBRARY_IMPL(CUTEDSL_OP_NAMESPACE, CUDA, m) {
   m.impl(CUTEDSL_OP_NAME, TORCH_BOX(&cutedsl_op));
 }
 
-STABLE_TORCH_LIBRARY_IMPL(triton_aot, CPU, m) {
+STABLE_TORCH_LIBRARY_IMPL(CUTEDSL_OP_NAMESPACE, CPU, m) {
   m.impl(CUTEDSL_OP_NAME, TORCH_BOX(&cutedsl_dummy_op));
 }
 
-STABLE_TORCH_LIBRARY_IMPL(triton_aot, Meta, m) {
+STABLE_TORCH_LIBRARY_IMPL(CUTEDSL_OP_NAMESPACE, Meta, m) {
   m.impl(CUTEDSL_OP_NAME, TORCH_BOX(&cutedsl_dummy_op));
 }

@@ -75,17 +75,17 @@ class CuTeAdapter(AOTTAdapter[tuple[CuTeAOT, set[str]]]):
                 f"[AOTT][CuTeDSL]: compiling {fn_name} with specs: {kspec.specs}"
             )
 
-            compile_cutedsl_to_cpp(
+            kernel_obj_files = compile_cutedsl_to_cpp(
                 op=op,
                 specs=kspec.specs,
                 install_dir=fn_dir,
-                prefix=fn_name,
             )
 
             build_cutedsl_aot_extension(
                 source_dir=fn_dir,
                 kernel_name=fn_name,
                 output_dir=fn_dir,
+                kernel_obj_files=kernel_obj_files,
                 build_config=ctx.extension_build_config,
             )
 

@@ -3,7 +3,7 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
 // __CUTEDSL_AOT_GENERATE_BEGIN__ HEADER_INCLUDE
-#include "_cutedsl_VectorAddKernel.h"
+#include "_cutedsl_VectorAddKernel__11c4c622.h"
 // __CUTEDSL_AOT_GENERATE_END__ HEADER_INCLUDE
 
 #include <cuda.h>
@@ -172,21 +172,21 @@ extern "C" CUresult _cuKernelGetAttribute(
 }
 
 // __CUTEDSL_AOT_GENERATE_BEGIN__ ENTRY_FN
-extern "C" int32_t _cutedsl_VectorAddKernel_entry(void* x_data, const int64_t* x_sizes, void* y_data, const int64_t* y_sizes, void* out_data, const int64_t* out_sizes, int32_t n, CUstream stream) {
-  static _cutedsl_VectorAddKernel_Kernel_Module_t module;
+extern "C" int32_t _cutedsl_VectorAddKernel__11c4c622_entry(void* x_data, const int64_t* x_sizes, void* y_data, const int64_t* y_sizes, void* out_data, const int64_t* out_sizes, int32_t n, CUstream stream) {
+  static _cutedsl_VectorAddKernel__11c4c622_Kernel_Module_t module;
   static std::once_flag load_once;
   std::call_once(load_once, []() {
-    _cutedsl_VectorAddKernel_Kernel_Module_Load(&module);
+    _cutedsl_VectorAddKernel__11c4c622_Kernel_Module_Load(&module);
   });
-  _cutedsl_VectorAddKernel_Tensor_x_t x_t;
+  _cutedsl_VectorAddKernel__11c4c622_Tensor_x_t x_t;
   x_t.data = x_data;
   x_t.dynamic_shapes[0] = static_cast<int32_t>(x_sizes[0]);
-  _cutedsl_VectorAddKernel_Tensor_y_t y_t;
+  _cutedsl_VectorAddKernel__11c4c622_Tensor_y_t y_t;
   y_t.data = y_data;
   y_t.dynamic_shapes[0] = static_cast<int32_t>(y_sizes[0]);
-  _cutedsl_VectorAddKernel_Tensor_out_t out_t;
+  _cutedsl_VectorAddKernel__11c4c622_Tensor_out_t out_t;
   out_t.data = out_data;
   out_t.dynamic_shapes[0] = static_cast<int32_t>(out_sizes[0]);
-  return cute_dsl__cutedsl_VectorAddKernel_wrapper(&module, &x_t, &y_t, &out_t, n, stream);
+  return cute_dsl__cutedsl_VectorAddKernel__11c4c622_wrapper(&module, &x_t, &y_t, &out_t, n, stream);
 }
 // __CUTEDSL_AOT_GENERATE_END__ ENTRY_FN
