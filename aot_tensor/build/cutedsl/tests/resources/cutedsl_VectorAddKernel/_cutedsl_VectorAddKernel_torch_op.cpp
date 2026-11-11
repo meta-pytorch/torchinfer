@@ -13,6 +13,7 @@
 #include <torch/headeronly/core/ScalarType.h>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -20,13 +21,23 @@
 #define CUTEDSL_OP_NAMESPACE aot_tensor
 #define CUTEDSL_OP_NAME "_cutedsl_VectorAddKernel"
 #define CUTEDSL_SIDECAR_NAME "cutedsl_VectorAddKernel_cutedsl_impl.so"
-#define CUTEDSL_OP_SCHEMA "_cutedsl_VectorAddKernel(Tensor(a!) x, Tensor(b!) y, Tensor(c!) out, int n) -> ()"
+#define CUTEDSL_OP_SCHEMA "_cutedsl_VectorAddKernel(Tensor(a!)? x, Tensor(b!)? y, Tensor(c!)? out, int n) -> ()"
 // __CUTEDSL_AOT_GENERATE_END__ OP_NAME
 
 namespace {
 
 [[noreturn]] void cutedsl_fail(const std::string& message) {
   throw std::runtime_error("CuTeAOT " CUTEDSL_OP_NAME ": " + message);
+}
+
+// Tensors arrive as Tensor? (TorchScript compatibility); the kernel needs one.
+torch::stable::Tensor cutedsl_required(
+    const std::optional<torch::stable::Tensor>& tensor,
+    const char* name) {
+  if (!tensor.has_value()) {
+    cutedsl_fail(std::string(name) + " must not be None");
+  }
+  return *tensor;
 }
 
 // An i32 scalar arrives as int64_t; narrowing must not silently wrap.
@@ -106,9 +117,12 @@ void _cutedsl_VectorAddKernel__11c4c622_run(torch::stable::Tensor x, torch::stab
   }
 }
 
-void cutedsl_op(torch::stable::Tensor x, torch::stable::Tensor y, torch::stable::Tensor out, int64_t n) {
+void cutedsl_op(std::optional<torch::stable::Tensor> x_opt, std::optional<torch::stable::Tensor> y_opt, std::optional<torch::stable::Tensor> out_opt, int64_t n) {
+  const torch::stable::Tensor x = cutedsl_required(x_opt, "x");
   if (reinterpret_cast<uintptr_t>(x.data_ptr()) % 16 != 0) cutedsl_fail("x must be 16-byte aligned");
+  const torch::stable::Tensor y = cutedsl_required(y_opt, "y");
   if (reinterpret_cast<uintptr_t>(y.data_ptr()) % 16 != 0) cutedsl_fail("y must be 16-byte aligned");
+  const torch::stable::Tensor out = cutedsl_required(out_opt, "out");
   if (reinterpret_cast<uintptr_t>(out.data_ptr()) % 16 != 0) cutedsl_fail("out must be 16-byte aligned");
   if (x.scalar_type() == torch::headeronly::ScalarType::Float && x.dim() == 1 && x.stride(0) == 1 && y.scalar_type() == torch::headeronly::ScalarType::Float && y.dim() == 1 && y.stride(0) == 1 && out.scalar_type() == torch::headeronly::ScalarType::Float && out.dim() == 1 && out.stride(0) == 1) {
     _cutedsl_VectorAddKernel__11c4c622_run(x, y, out, n);
@@ -117,7 +131,7 @@ void cutedsl_op(torch::stable::Tensor x, torch::stable::Tensor y, torch::stable:
   cutedsl_fail("no compiled specialization matches the arguments; compiled: x: torch.float32 rank 1 unit-stride dim 0, y: torch.float32 rank 1 unit-stride dim 0, out: torch.float32 rank 1 unit-stride dim 0");
 }
 
-void cutedsl_dummy_op(torch::stable::Tensor x, torch::stable::Tensor y, torch::stable::Tensor out, int64_t n) {}
+void cutedsl_dummy_op(std::optional<torch::stable::Tensor> x_opt, std::optional<torch::stable::Tensor> y_opt, std::optional<torch::stable::Tensor> out_opt, int64_t n) {}
 // __CUTEDSL_AOT_GENERATE_END__ OP_FN
 
 } // namespace

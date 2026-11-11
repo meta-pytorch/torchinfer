@@ -11,6 +11,7 @@
 #include <torch/headeronly/core/ScalarType.h>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -25,6 +26,16 @@ namespace {
 
 [[noreturn]] void cutedsl_fail(const std::string& message) {
   throw std::runtime_error("CuTeAOT " CUTEDSL_OP_NAME ": " + message);
+}
+
+// Tensors arrive as Tensor? (TorchScript compatibility); the kernel needs one.
+torch::stable::Tensor cutedsl_required(
+    const std::optional<torch::stable::Tensor>& tensor,
+    const char* name) {
+  if (!tensor.has_value()) {
+    cutedsl_fail(std::string(name) + " must not be None");
+  }
+  return *tensor;
 }
 
 // An i32 scalar arrives as int64_t; narrowing must not silently wrap.

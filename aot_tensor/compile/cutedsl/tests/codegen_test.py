@@ -191,7 +191,7 @@ class TorchChecksTest(unittest.TestCase):
             )
         )
         self.assertEqual(
-            cg.torch_checks()[1:],
+            cg.torch_checks()[2:],  # after the unwrap and alignment check
             [
                 "if (a.dim() == 3) {",
                 '  if (a.size(1) % 16 != 0) cutedsl_fail("a.size(1) must be a '
@@ -208,16 +208,19 @@ class TorchChecksTest(unittest.TestCase):
         cg = make_codegen(
             CuTeTensorArg("a", stride_order=(0, 1), compact_mode=1, divisibility=1)
         )
-        self.assertEqual(len(cg.torch_checks()), 1)  # just the alignment check
+        self.assertEqual(len(cg.torch_checks()), 2)  # unwrap + alignment check
 
 
 class TorchParamTest(unittest.TestCase):
     def test_tensor_cpp_and_schema(self) -> None:
         cg = make_codegen(CuTeTensorArg("x"))
         self.assertEqual(cg.torch_cpp_param(), "torch::stable::Tensor x")
+        self.assertEqual(
+            cg.torch_op_param(), "std::optional<torch::stable::Tensor> x_opt"
+        )
         # Schema alias tracks the arg's position in the op signature.
-        self.assertEqual(cg.torch_schema_param(0), "Tensor(a!) x")
-        self.assertEqual(cg.torch_schema_param(1), "Tensor(b!) x")
+        self.assertEqual(cg.torch_schema_param(0), "Tensor(a!)? x")
+        self.assertEqual(cg.torch_schema_param(1), "Tensor(b!)? x")
 
     def test_scalar_cpp_widens_but_schema_stays_int(self) -> None:
         cg = make_codegen(ScalarArg("n", "i32"))
@@ -365,7 +368,7 @@ class GenerateContentTest(unittest.TestCase):
         self.assertIn(
             f"#define CUTEDSL_OP_NAMESPACE {DEFAULT_OP_NAMESPACE_PREFIX}\n", out
         )
-        self.assertIn('#define CUTEDSL_OP_SCHEMA "op(Tensor(a!) x, int n) -> ()"', out)
+        self.assertIn('#define CUTEDSL_OP_SCHEMA "op(Tensor(a!)? x, int n) -> ()"', out)
         self.assertIn('#define CUTEDSL_SIDECAR_NAME "impl.so"', out)
         for symbol in ("op__aaaa", "op__bbbb"):
             self.assertIn(f"void {symbol}_run(torch::stable::Tensor x, int64_t n)", out)
@@ -383,7 +386,8 @@ class GenerateContentTest(unittest.TestCase):
         self.assertIn('cutedsl_i32(n, "n")', out)
         # Checked once, before dispatch: every variant assumes the same alignment.
         self.assertIn(
-            "void cutedsl_op(torch::stable::Tensor x, int64_t n) {\n"
+            "void cutedsl_op(std::optional<torch::stable::Tensor> x_opt, int64_t n) {\n"
+            '  const torch::stable::Tensor x = cutedsl_required(x_opt, "x");\n'
             "  if (reinterpret_cast<uintptr_t>(x.data_ptr()) % 16 != 0) "
             'cutedsl_fail("x must be 16-byte aligned");\n'
             "  if (x.scalar_type() == F32) {",

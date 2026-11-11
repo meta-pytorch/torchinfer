@@ -215,8 +215,14 @@ class ArgCodegen(Generic[_SpecT]):
     def torch_schema_param(self, index: int) -> str:
         raise NotImplementedError
 
+    def torch_op_param(self) -> str:
+        """The param as the registered op takes it (may differ from the C++ type
+        the run functions use)."""
+        return self.torch_cpp_param()
+
     def torch_checks(self) -> list[str]:
-        """C++ statements rejecting a value the compiled kernel can't take."""
+        """C++ statements run first in the op: bind the arg from its op param and
+        reject a value the compiled kernel can't take."""
         return []
 
     # --- sidecar entry surface (runtime kinds only) ---
@@ -244,17 +250,21 @@ class TensorCodegen(ArgCodegen[CuTeTensorArg]):
     def torch_cpp_param(self) -> str:
         return f"torch::stable::Tensor {self.name}"
 
+    def torch_op_param(self) -> str:
+        return f"std::optional<torch::stable::Tensor> {self.name}_opt"
+
     def torch_schema_param(self, index: int) -> str:
-        # TODO: take Tensor? like Triton and FlyDSL, as the generated-cpp-stable-abi
-        # rule requires for TorchScript; needs an NVIDIA host to validate.
+        # Tensor? even when required: a wrapper typed Optional[Tensor] doesn't
+        # script against a plain Tensor schema.
         alias = chr(ord("a") + index)
-        return f"Tensor({alias}!) {self.name}"
+        return f"Tensor({alias}!)? {self.name}"
 
     def torch_checks(self) -> list[str]:
         # cute_arg compiles with assumed_align=alignment, and the exported C
         # wrapper doesn't check it (the eager JIT executor does).
         n, align = self.name, self.spec.alignment
         return [
+            f'const torch::stable::Tensor {n} = cutedsl_required({n}_opt, "{n}");',
             f"if (reinterpret_cast<uintptr_t>({n}.data_ptr()) % {align} != 0) "
             f'cutedsl_fail("{n} must be {align}-byte aligned");',
             *self._compact_checks(),
@@ -263,8 +273,9 @@ class TensorCodegen(ArgCodegen[CuTeTensorArg]):
     def _compact_checks(self) -> list[str]:
         """mark_compact_shape_dynamic promises the compiler that the compact
         mode's size, and the strides of the modes outside it in stride_order,
-        are multiples of divisibility. Eager checks this when marking; the
-        exported C wrapper doesn't."""
+        are multiples of divisibility; the kernel relies on nothing else, since
+        the strides stay runtime values. Eager checks more when marking (the
+        whole layout must be compact); the exported C wrapper checks nothing."""
         spec = self.spec
         order = spec.stride_order
         if spec.compact_mode is None or order is None or spec.divisibility == 1:
@@ -578,6 +589,7 @@ def generate_torch_op_content(
     sidecar_so_name: str,
 ) -> str:
     cpp_params = ", ".join(cg.torch_cpp_param() for cg in codegens)
+    op_params = ", ".join(cg.torch_op_param() for cg in codegens)
     schema_params = ", ".join(
         cg.torch_schema_param(idx) for idx, cg in enumerate(codegens)
     )
@@ -596,9 +608,9 @@ def generate_torch_op_content(
     # name and sidecar basename reach it through the OP_NAME macros. Only the
     # per-variant run functions and the dispatching op body are per-op.
     checks = [line for cg in codegens for line in cg.torch_checks()]
-    op_lines = [f"void cutedsl_op({cpp_params}) {{"]
+    op_lines = [f"void cutedsl_op({op_params}) {{"]
     op_lines += [f"  {line}" for line in [*checks, *selector]]
-    op_lines += ["}", "", f"void cutedsl_dummy_op({cpp_params}) {{}}"]
+    op_lines += ["}", "", f"void cutedsl_dummy_op({op_params}) {{}}"]
     run_fns = [run_fn(op_name, cute, cpp_params) for cute in variants]
     op_fn = "\n".join([*run_fns, *op_lines]) + "\n"
 
