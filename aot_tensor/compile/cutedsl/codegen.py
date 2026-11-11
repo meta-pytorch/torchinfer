@@ -4,10 +4,42 @@
 
 from __future__ import annotations
 
-# CuTeDSL AOT codegen model: the per-arg ABI shared by both the eager execution
-# path (eager.py) and the C++ compile path (pipeline.py). This module has
-# no cute.compile/export and does no kernel execution -- it only describes how each
-# arg kind (tensor, scalar, constexpr) maps onto the torch op / sidecar / cute ABI.
+# CuTeDSL AOT codegen: the per-arg ABI shared by the eager path (eager.py) and
+# the compile path (pipeline.py), and the two C++ shims built from it. No
+# cute.compile/export and no kernel execution, so it is CPU-testable.
+#
+# One CuTeDSL op ships as two .so files. CuTeDSL itself builds the kernel
+# (`cute.compile(...).export_to_c(prefix)` -> {prefix}.h + {prefix}.o); we
+# only write the two small C++ shims that wrap it and call into it:
+#
+#   model calls  torch.ops.aot_tensor.{op}(Tensor, int, ...)
+#        |
+#        v
+#   {op}_torch_op.cpp      generate_torch_op_content()    --> {ext}.so
+#        - registers the torch op (stable ABI, no libtorch link)
+#        - selects the variant matching the call (``spec_selector``), grabs
+#          the current CUDA stream
+#        - unpacks each Tensor into plain C args: data_ptr + sizes/strides
+#        |
+#        |  plain C call -- no torch types cross this line
+#        v
+#   {op}_entry.cpp         generate_sidecar_entry_content() --> {ext}_cutedsl_impl.so
+#        - one C function {symbol}_entry(void* data, const int64_t* sizes, ...)
+#          per variant, symbol = {op}__{spec_hash[:8]}
+#        - repacks those flat args into the per-tensor structs from {symbol}.h
+#        - loads the kernel and provides the cudart 12.5+ shims it needs
+#        |
+#        v
+#   {symbol}.h + {symbol}.o  (CuTeDSL's export_to_c output -- not ours)
+#        - the actual kernel launch
+#
+# Why two .so: the sidecar pulls in cudart 12.5+ (cudaLibrary* runtime API). The
+# torch op .so is loaded RTLD_GLOBAL alongside PyTorch's own cudart, so keeping the
+# kernel's cudart there risks interposing the wrong version. The sidecar instead
+# dlopen's cudart RTLD_LOCAL to quarantine those symbols, leaving the torch op .so
+# on the stable ABI / version-stable libcuda driver API. Both .so sit in one dir;
+# the torch op locates the sidecar relative to itself via dladdr. Every variant
+# links into the one sidecar: export_to_c prefixes all its global symbols.
 
 import re
 from collections.abc import Generator
@@ -17,6 +49,9 @@ from typing import Any, Callable, Generic, TypeVar
 import torch
 from aot_tensor.arg_specs.common import ConstexprArg, ScalarArg
 from aot_tensor.arg_specs.cute import CuTeArgSpec, CuTeTensorArg
+from aot_tensor.compile.spec_selector import render_selector, Variant
+from aot_tensor.compile.template_utils import CUTEDSL_TEMPLATES
+from aot_tensor.constants import DEFAULT_OP_NAMESPACE_PREFIX
 
 _C_IDENTIFIER: re.Pattern[str] = re.compile(r"^[A-Za-z_]\w*$")
 
@@ -359,7 +394,7 @@ def make_codegen(spec: CuTeArgSpec) -> ArgCodegen[Any]:
     raise RuntimeError(f"CuTeAOT: unsupported arg spec {spec!r}.")
 
 
-def _codegens(specs: list[CuTeArgSpec]) -> list[ArgCodegen[Any]]:
+def make_codegens(specs: list[CuTeArgSpec]) -> list[ArgCodegen[Any]]:
     return [make_codegen(spec) for spec in specs]
 
 
@@ -371,20 +406,18 @@ def build_cute_call_args(
     # Local import: cuda is stub-less/GPU-only; keep this module CPU-importable.
     import cuda.bindings.driver as cuda  # @manual  # pyre-ignore[21]: no stubs
 
-    codegens = _codegens(arg_specs)
+    codegens = make_codegens(arg_specs)
     return tuple(cg.cute_arg(values[cg.name]) for cg in codegens) + (
         cuda.CUstream(torch.cuda.current_stream().cuda_stream),
     )
 
 
-def _entry_args(
-    codegens: list[ArgCodegen[Any]], fields: TensorFields
-) -> list[EntryArg]:
+def entry_args(codegens: list[ArgCodegen[Any]], fields: TensorFields) -> list[EntryArg]:
     """Flat C arg list for ``{prefix}_entry`` (tensors expanded, scalars cast)."""
     return [arg for cg in codegens for arg in cg.entry_args(fields)]
 
 
-def _entry_struct_builds(
+def entry_struct_builds(
     codegens: list[ArgCodegen[Any]], prefix: str, fields: TensorFields
 ) -> str:
     """C statements filling each ``{prefix}_Tensor_{name}_t`` from the entry args."""
@@ -408,3 +441,139 @@ def validate_cutedsl_op(codegens: list[ArgCodegen[Any]], op_name: str) -> None:
     for cg in codegens:
         _check_c_identifier(cg.name, "arg name")
         cg.validate(op_name)
+
+
+# =====================================================================
+# variants: one exported specialization each
+# =====================================================================
+
+
+@dataclass(frozen=True)
+class CuTeVariant:
+    """One exported specialization. ``entry_args``: the flat C args of its
+    sidecar entry; both the entry and the torch op's call to it use them."""
+
+    variant: Variant
+    fields: TensorFields
+    entry_args: tuple[EntryArg, ...]
+
+
+def make_variant(
+    codegens: list[ArgCodegen[Any]], variant: Variant, header: str
+) -> CuTeVariant:
+    """Build a variant from the ``{symbol}.h`` that ``export_to_c`` wrote."""
+    fields = tensor_struct_fields(codegens, variant.symbol, header)
+    runtime = [cg for cg in codegens if cg.is_runtime]
+    return CuTeVariant(variant, fields, tuple(entry_args(runtime, fields)))
+
+
+# =====================================================================
+# sidecar entry (.cpp) codegen
+# =====================================================================
+
+
+def entry_fn(codegens: list[ArgCodegen[Any]], cute: CuTeVariant) -> str:
+    symbol = cute.variant.symbol
+    runtime = [cg for cg in codegens if cg.is_runtime]
+    entry_params = ", ".join([a.decl for a in cute.entry_args] + ["CUstream stream"])
+    struct_builds = entry_struct_builds(runtime, symbol, cute.fields)
+    wrapper_parts = [cg.wrapper_arg() for cg in runtime]
+    wrapper_args = ", ".join([p for p in wrapper_parts if p is not None] + ["stream"])
+    return (
+        f'extern "C" int32_t {symbol}_entry({entry_params}) {{\n'
+        f"  static {symbol}_Kernel_Module_t module;\n"
+        f"  static std::once_flag load_once;\n"
+        f"  std::call_once(load_once, []() {{\n"
+        f"    {symbol}_Kernel_Module_Load(&module);\n"
+        f"  }});\n"
+        f"  {struct_builds}\n"
+        f"  return cute_dsl_{symbol}_wrapper(&module, {wrapper_args});\n"
+        f"}}\n"
+    )
+
+
+def generate_sidecar_entry_content(
+    op_name: str, codegens: list[ArgCodegen[Any]], variants: list[CuTeVariant]
+) -> str:
+    # Only the entry functions are per-op. The cudart loader/shim boilerplate is
+    # static and lives verbatim in compile/cutedsl/templates/cutedsl_entry.cpp (op_name reaches
+    # it through the CUTEDSL_OP_NAME macro defined in the OP_NAME region).
+    return CUTEDSL_TEMPLATES.render(
+        "cutedsl_entry.cpp",
+        {
+            "HEADER_INCLUDE": "".join(
+                f'#include "{cute.variant.symbol}.h"\n' for cute in variants
+            ),
+            "OP_NAME": f'#define CUTEDSL_OP_NAME "{op_name}"\n',
+            "ENTRY_FN": "\n".join(entry_fn(codegens, cute) for cute in variants),
+        },
+    )
+
+
+# =====================================================================
+# torch op (.cpp) codegen
+# =====================================================================
+
+
+def run_fn(op_name: str, cute: CuTeVariant, cpp_params: str) -> str:
+    symbol = cute.variant.symbol
+    entry_types = ", ".join([a.ctype for a in cute.entry_args] + ["CUstream"])
+    entry_call_args = ", ".join([a.call for a in cute.entry_args] + ["stream"])
+    lines = [
+        f"void {symbol}_run({cpp_params}) {{",
+        f"  using EntryFn = int32_t (*)({entry_types});",
+        f'  static EntryFn entry = cutedsl_load_entry<EntryFn>("{symbol}_entry");',
+        "  CUstream stream = cutedsl_aot_get_current_stream();",
+        f"  int32_t result = entry({entry_call_args});",
+        "  if (result != 0) {",
+        f'    throw std::runtime_error("CuTeAOT {op_name}: generated sidecar returned CUDA error " + std::to_string(result));',
+        "  }",
+        "}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def generate_torch_op_content(
+    op_name: str,
+    codegens: list[ArgCodegen[Any]],
+    variants: list[CuTeVariant],
+    sidecar_so_name: str,
+) -> str:
+    cpp_params = ", ".join(cg.torch_cpp_param() for cg in codegens)
+    schema_params = ", ".join(
+        cg.torch_schema_param(idx) for idx, cg in enumerate(codegens)
+    )
+    call_args = ", ".join(cg.name for cg in codegens)
+    selector = render_selector(
+        [cute.variant for cute in variants],
+        {
+            cute.variant.symbol: f"{cute.variant.symbol}_run({call_args})"
+            for cute in variants
+        },
+        fail="cutedsl_fail",
+    )
+
+    # The loader boilerplate (stream getter, dladdr sidecar lookup, dlopen/dlsym)
+    # is static and lives verbatim in compile/cutedsl/templates/cutedsl_torch_op.cpp; the per-op
+    # name and sidecar basename reach it through the OP_NAME macros. Only the
+    # per-variant run functions and the dispatching op body are per-op.
+    op_lines = [f"void cutedsl_op({cpp_params}) {{"]
+    op_lines += [f"  {line}" for line in selector]
+    op_lines += ["}", "", f"void cutedsl_dummy_op({cpp_params}) {{}}"]
+    run_fns = [run_fn(op_name, cute, cpp_params) for cute in variants]
+    op_fn = "\n".join([*run_fns, *op_lines]) + "\n"
+
+    # Registration is static template text; namespace, op name and schema come in
+    # through the OP_NAME macros.
+    return CUTEDSL_TEMPLATES.render(
+        "cutedsl_torch_op.cpp",
+        {
+            "OP_NAME": (
+                f"#define CUTEDSL_OP_NAMESPACE {DEFAULT_OP_NAMESPACE_PREFIX}\n"
+                f'#define CUTEDSL_OP_NAME "{op_name}"\n'
+                f"#define CUTEDSL_SIDECAR_NAME {_quote_cpp_string(sidecar_so_name)}\n"
+                f'#define CUTEDSL_OP_SCHEMA "{op_name}({schema_params}) -> ()"\n'
+            ),
+            "OP_FN": op_fn,
+        },
+    )

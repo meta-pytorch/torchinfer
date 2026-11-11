@@ -23,24 +23,23 @@ from aot_tensor.arg_specs.common import ConstexprArg, RawSpec, ScalarArg
 from aot_tensor.arg_specs.cute import CuTeTensorArg
 from aot_tensor.compile.cutedsl import pipeline as cutedsl_mod
 from aot_tensor.compile.cutedsl.codegen import (
-    _entry_args,
-    _entry_struct_builds,
     _SCALAR_DTYPES,
     ArgCodegen,
     ConstexprCodegen,
     cute_scalar,
+    CuTeVariant,
+    entry_args,
+    entry_struct_builds,
+    generate_sidecar_entry_content,
+    generate_torch_op_content,
     make_codegen,
+    make_variant,
     parse_tensor_struct_fields,
     ScalarCodegen,
     TensorCodegen,
     validate_cutedsl_op,
 )
-from aot_tensor.compile.cutedsl.pipeline import (
-    compile_cutedsl_to_cpp,
-    CuTeVariant,
-    generate_sidecar_entry_content,
-    generate_torch_op_content,
-)
+from aot_tensor.compile.cutedsl.pipeline import compile_cutedsl_to_cpp
 from aot_tensor.compile.spec_selector import Variant
 from aot_tensor.constants import DEFAULT_OP_NAMESPACE_PREFIX
 from parameterized import parameterized
@@ -94,7 +93,7 @@ class EntryAbiConsistencyTest(unittest.TestCase):
     """Each entry arg pairs a decl, a fn-ptr type, and a call expr in lockstep."""
 
     def test_contiguous_tensor_omits_strides(self) -> None:
-        args = _entry_args(
+        args = entry_args(
             [make_codegen(CuTeTensorArg("x")), make_codegen(ScalarArg("n", "i32"))],
             {"x": (2, 0)},
         )
@@ -111,7 +110,7 @@ class EntryAbiConsistencyTest(unittest.TestCase):
         )
 
     def test_non_contiguous_tensor_includes_strides(self) -> None:
-        args = _entry_args([make_codegen(CuTeTensorArg("y"))], {"y": (2, 2)})
+        args = entry_args([make_codegen(CuTeTensorArg("y"))], {"y": (2, 2)})
         self.assertEqual(
             [a.decl for a in args],
             ["void* y_data", "const int64_t* y_sizes", "const int64_t* y_strides"],
@@ -130,14 +129,14 @@ class EntryAbiConsistencyTest(unittest.TestCase):
         ]
     )
     def test_scalar_entry_param_per_dtype(self, dtype: str, entry: str) -> None:
-        args = _entry_args([make_codegen(ScalarArg("v", dtype))], {})
+        args = entry_args([make_codegen(ScalarArg("v", dtype))], {})
         self.assertEqual(args[0].decl, f"{entry} v")
         self.assertEqual(args[0].ctype, entry)
 
 
 class EntryStructBuildsTest(unittest.TestCase):
     def test_contiguous_fills_shapes_only(self) -> None:
-        out = _entry_struct_builds(
+        out = entry_struct_builds(
             [make_codegen(CuTeTensorArg("x"))], _PREFIX, {"x": (2, 0)}
         )
         self.assertIn("pfx_Tensor_x_t x_t;", out)
@@ -146,7 +145,7 @@ class EntryStructBuildsTest(unittest.TestCase):
         self.assertNotIn("dynamic_strides", out)
 
     def test_non_contiguous_fills_strides(self) -> None:
-        out = _entry_struct_builds(
+        out = entry_struct_builds(
             [make_codegen(CuTeTensorArg("y"))], _PREFIX, {"y": (2, 2)}
         )
         self.assertIn("y_t.dynamic_strides[0] = y_strides[0];", out)
@@ -158,7 +157,7 @@ class EntryStructBuildsTest(unittest.TestCase):
         # dynamic_strides, so the stride slots must map to the remaining torch
         # dims in order (1, 2), not identity (0, 1) which would feed the static
         # unit stride into the kernel layout.
-        out = _entry_struct_builds(
+        out = entry_struct_builds(
             [make_codegen(CuTeTensorArg("b", leading_dim=0))], _PREFIX, {"b": (3, 2)}
         )
         # dynamic_shapes stay identity (every dim has a dynamic shape).
@@ -279,25 +278,47 @@ class ScalarDtypeTableTest(unittest.TestCase):
             cute_scalar(1, "f16")
 
 
-def _variant(symbol: str, condition: str, fields: dict[str, Any]) -> CuTeVariant:
-    return CuTeVariant(Variant(symbol, condition, f"{symbol} signature"), fields)
+_CODEGENS: list[ArgCodegen[Any]] = [
+    make_codegen(CuTeTensorArg("x")),
+    make_codegen(ScalarArg("n", "i32")),
+]
 
 
-_F32 = _variant("op__aaaa", "x.scalar_type() == F32", {"x": (2, 0)})
+def _variant(symbol: str, condition: str, x_struct_body: str) -> CuTeVariant:
+    header = f"typedef struct {{ void* data; {x_struct_body} }} {symbol}_Tensor_x_t;"
+    return make_variant(
+        _CODEGENS, Variant(symbol, condition, f"{symbol} signature"), header
+    )
+
+
+_F32 = _variant("op__aaaa", "x.scalar_type() == F32", "int32_t dynamic_shapes[2];")
 # Non-contiguous: its entry takes strides too.
-_F16 = _variant("op__bbbb", "x.scalar_type() == F16", {"x": (2, 2)})
+_F16 = _variant(
+    "op__bbbb",
+    "x.scalar_type() == F16",
+    "int32_t dynamic_shapes[2]; int64_t dynamic_strides[2];",
+)
+
+
+class MakeVariantTest(unittest.TestCase):
+    def test_reads_fields_from_the_header_and_derives_the_entry_abi(self) -> None:
+        self.assertEqual(_F16.fields, {"x": (2, 2)})
+        self.assertEqual(
+            [a.decl for a in _F16.entry_args],
+            [
+                "void* x_data",
+                "const int64_t* x_sizes",
+                "const int64_t* x_strides",
+                "int32_t n",
+            ],
+        )
 
 
 class GenerateContentTest(unittest.TestCase):
     """Render both shims for two variants (CPU, no compile)."""
 
-    _codegens: list[ArgCodegen[Any]] = [
-        make_codegen(CuTeTensorArg("x")),
-        make_codegen(ScalarArg("n", "i32")),
-    ]
-
     def test_sidecar_entry(self) -> None:
-        out = generate_sidecar_entry_content("op", self._codegens, [_F32, _F16])
+        out = generate_sidecar_entry_content("op", _CODEGENS, [_F32, _F16])
         self.assertIn('#define CUTEDSL_OP_NAME "op"', out)
         self.assertIn('#include "op__aaaa.h"\n#include "op__bbbb.h"', out)
         for symbol in ("op__aaaa", "op__bbbb"):
@@ -308,7 +329,7 @@ class GenerateContentTest(unittest.TestCase):
         self.assertEqual(out.count("const int64_t* x_strides"), 1)
 
     def test_torch_op(self) -> None:
-        out = generate_torch_op_content("op", self._codegens, [_F32, _F16], "impl.so")
+        out = generate_torch_op_content("op", _CODEGENS, [_F32, _F16], "impl.so")
         self.assertIn(
             f"#define CUTEDSL_OP_NAMESPACE {DEFAULT_OP_NAMESPACE_PREFIX}\n", out
         )
