@@ -18,7 +18,7 @@ from aot_tensor.arg_specs.common import (
 from aot_tensor.arg_specs.cute import CuTeArgSpec
 from aot_tensor.compile.adapter_base import hash_spec
 from aot_tensor.compile.cutedsl.adapter import get_cutedsl_eager_cache
-from aot_tensor.compile.cutedsl.codegen import build_cute_call_args
+from aot_tensor.compile.cutedsl.codegen import build_cute_call_args, make_codegens
 
 
 def _compile_cache_key(
@@ -54,4 +54,9 @@ def run_cutedsl_jit(
     if compiled is None:
         compiled = compile_fn(jit_fn, *cute_args)
         cache[key] = compiled
-    return compiled(*cute_args)
+    # The compiled function takes only the runtime args (constexprs are baked in);
+    # the stream is the last of cute_args.
+    runtime_args = [
+        arg for cg, arg in zip(make_codegens(arg_specs), cute_args) if cg.is_runtime
+    ]
+    return compiled(*runtime_args, cute_args[-1])
