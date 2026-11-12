@@ -14,8 +14,8 @@ from aot_tensor.build.triton.amd_extension_builder import AmdExtensionBuilder
 from setuptools import Extension, setup
 
 # The .so exports nothing: the torch op registers from a static initializer, and
-# hiding the launcher and mgpu* symbols keeps two FlyDSL .so files -- or the
-# eager FlyDSL runtime -- in one process from binding to each other's.
+# hiding the launcher symbols keeps two FlyDSL .so files -- or the eager FlyDSL
+# runtime -- in one process from binding to each other's.
 _VERSION_SCRIPT = "{ local: *; };\n"
 
 
@@ -25,7 +25,8 @@ class FlydslExtensionBuilder(AmdExtensionBuilder):
 
     Reuses the AMD builder's ROCm/torch include and flag resolution; ``build``
     is overridden because the inherited one embeds Triton hsaco files, which a
-    FlyDSL launcher object already carries.
+    FlyDSL launcher object already carries. ``link_flags`` are what the objects'
+    export metadata asks for (``linker_flags``).
     """
 
     def __init__(
@@ -35,9 +36,11 @@ class FlydslExtensionBuilder(AmdExtensionBuilder):
         output_dir: str,
         objects: Sequence[str],
         build_config: ExtensionBuildConfig | None = None,
+        link_flags: Sequence[str] = (),
     ) -> None:
         super().__init__(source_dir, kernel_name, output_dir, build_config)
         self.objects: list[str] = list(objects)
+        self.link_flags: list[str] = list(link_flags)
 
     def get_extra_compile_args(self) -> list[str]:
         # SoBuildExtension drops sysconfig CFLAGS, so without this the op body
@@ -67,7 +70,10 @@ class FlydslExtensionBuilder(AmdExtensionBuilder):
             libraries=self.get_libraries(),
             extra_compile_args=self.get_extra_compile_args(),
             extra_objects=self.objects,
-            extra_link_args=[f"-Wl,--version-script={version_script}"],
+            extra_link_args=[
+                f"-Wl,--version-script={version_script}",
+                *self.link_flags,
+            ],
             language="c++",
         )
         script_args = [
@@ -96,9 +102,15 @@ def build_flydsl_aot_extension(
     output_dir: str,
     objects: Sequence[str],
     build_config: ExtensionBuildConfig | None = None,
+    link_flags: Sequence[str] = (),
 ) -> str:
     if not is_amd():
         raise NotImplementedError("FlyDSL AOT is only supported on AMD ROCm.")
     return FlydslExtensionBuilder(
-        source_dir, kernel_name, output_dir, objects, build_config=build_config
+        source_dir,
+        kernel_name,
+        output_dir,
+        objects,
+        build_config=build_config,
+        link_flags=link_flags,
     ).build()

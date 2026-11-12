@@ -53,6 +53,7 @@ class FlydslExtensionBuilderTest(unittest.TestCase):
             self.output_dir,
             self.objects if objects is None else objects,
             build_config=ExtensionBuildConfig(gpu_toolkit_path=self.toolkit),
+            link_flags=["-lamdhip64", "-pthread"],
         )
 
     def test_links_objects_into_a_self_contained_so_exporting_nothing(self) -> None:
@@ -78,7 +79,8 @@ class FlydslExtensionBuilderTest(unittest.TestCase):
             [os.path.join(_FIXTURE_DIR, f"{_KERNEL}_torch_op.cpp")],
         )
         self.assertEqual(extension.extra_objects, self.objects)
-        (link_arg,) = extension.extra_link_args
+        link_arg, *link_flags = extension.extra_link_args
+        self.assertEqual(link_flags, ["-lamdhip64", "-pthread"])
         self.assertTrue(link_arg.startswith("-Wl,--version-script="))
         with open(link_arg.split("=", 1)[1]) as fp:
             self.assertEqual(fp.read().split(), ["{", "local:", "*;", "};"])

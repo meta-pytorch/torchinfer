@@ -51,14 +51,17 @@ class FlyAdapter(AOTTAdapter[tuple[FlyAOT, set[str]]]):
         logger.info(f"[AOTT][FlyDSL]: compiling {len(kernel_specs)} kernels")
         for op, kspec in kernel_specs.items():
             fn_dir = os.path.join(ctx.compile_path, get_flydsl_aot_dir_name(op))
-            objects = compile_flydsl_to_cpp(
+            exported = compile_flydsl_to_cpp(
                 op=op, specs=kspec.specs, install_dir=fn_dir
             )
             build_flydsl_aot_extension(
                 source_dir=fn_dir,
                 kernel_name=op.name,
                 output_dir=fn_dir,
-                objects=objects,
+                objects=[e.object_path for e in exported],
+                link_flags=list(
+                    dict.fromkeys(f for e in exported for f in e.linker_flags)
+                ),
                 build_config=ctx.extension_build_config,
             )
 

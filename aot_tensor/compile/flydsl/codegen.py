@@ -27,9 +27,9 @@ _OP_NAME_TMPL = """\
 """
 
 _EXTERNS_TMPL = """\
-extern "C" void {entry}(void** args);
-extern "C" void {module_init}(void** module, int32_t* err);
-extern "C" void {module_load}(void** module, int32_t* err);
+extern "C" int32_t {entry}(void** args);
+extern "C" int32_t {module_init}(void);
+extern "C" int32_t {module_load}(int32_t device);
 """
 
 _RUN_FN_TMPL = """\
@@ -127,20 +127,17 @@ def _layout_writes(slot: AbiSlot, local: str) -> list[str]:
     n = slot.arg_name
     lines: list[str] = []
     offset = 0
-    for dim in slot.shape_dims:
+    fields = [("size", dim, slot.shape_bits) for dim in slot.shape_dims] + [
+        ("stride", dim, slot.stride_bits) for dim in slot.stride_dims
+    ]
+    for accessor, dim, bits in fields:
+        value = f"{n}.{accessor}({dim})"
+        if bits == 32:
+            value = f'flydsl_i32({value}, "{value}")'
         lines.append(
-            f'flydsl_put<int32_t>({local}, sizeof({local}), {offset}, flydsl_i32({n}.size({dim}), "{n}.size({dim})"));'
+            f"flydsl_put<int{bits}_t>({local}, sizeof({local}), {offset}, {value});"
         )
-        offset += 4
-    stride_type = "int32_t" if slot.stride_bits == 32 else "int64_t"
-    for dim in slot.stride_dims:
-        value = f"{n}.stride({dim})"
-        if slot.stride_bits == 32:
-            value = f'flydsl_i32({value}, "{n}.stride({dim})")'
-        lines.append(
-            f"flydsl_put<{stride_type}>({local}, sizeof({local}), {offset}, {value});"
-        )
-        offset += slot.stride_bits // 8
+        offset += bits // 8
     return lines
 
 
@@ -249,10 +246,12 @@ class FlyVariant:
 
 def _variant_fn(fly: FlyVariant, specs: _Specs, cpp_params: str) -> str:
     exported = fly.exported
+    init, load = exported.module_init_symbol, exported.module_load_symbol
     body = [
-        "static std::once_flag loaded;",
-        f"std::call_once(loaded, flydsl_load_module, {exported.module_init_symbol}, "
-        f"{exported.module_load_symbol});",
+        "static std::once_flag initialized;",
+        f'std::call_once(initialized, [] {{ flydsl_check_status({init}(), "{init}"); }});',
+        # Loads the code object on the current device on its first launch there.
+        f'flydsl_check_status({load}(-1), "{load}");',
         "const int32_t device_index = torch::stable::accelerator::getCurrentDeviceIndex();",
     ]
     pointers: list[str] = []
@@ -262,7 +261,7 @@ def _variant_fn(fly: FlyVariant, specs: _Specs, cpp_params: str) -> str:
         pointers.append(pointer)
     body += [
         f"void* args[] = {{{', '.join(pointers)}}};",
-        f"{exported.entry_symbol}(args);",
+        f'flydsl_check_status({exported.entry_symbol}(args), "{exported.entry_symbol}");',
     ]
     return _RUN_FN_TMPL.format(
         symbol=fly.variant.symbol, params=cpp_params, body=_block(body)

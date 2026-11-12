@@ -10,13 +10,10 @@
 #include <bit>
 #include <cstdint>
 #include <limits>
-#include <map>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
-#include <tuple>
-#include <unordered_map>
 
 // __FLYDSL_AOT_GENERATE_BEGIN__ OP_NAME
 #define FLYDSL_OP_NAMESPACE placeholder
@@ -24,7 +21,7 @@
 #define FLYDSL_OP_SCHEMA "placeholder(Tensor x) -> ()"
 // __FLYDSL_AOT_GENERATE_END__ OP_NAME
 
-// Exported by the FlyDSL launcher objects linked into this .so, one set per
+// Exported by the FlyDSL export_to_c objects linked into this .so, one set per
 // specialization.
 // __FLYDSL_AOT_GENERATE_BEGIN__ EXTERNS
 // __FLYDSL_AOT_GENERATE_END__ EXTERNS
@@ -43,22 +40,24 @@ void* flydsl_current_stream(int32_t device_index) {
   return stream;
 }
 
-// Runs one variant's GPU module init + load once. They only record the image
-// (mgpuModuleLoad below); each device loads it on its first launch, in
-// mgpuModuleGetFunction.
-using FlydslModuleLoader = void (*)(void** module, int32_t* err);
-
-void flydsl_load_module(FlydslModuleLoader init, FlydslModuleLoader load) {
-  void* module = nullptr;
-  int32_t err = 0;
-  init(&module, &err);
-  if (err != 0) {
-    flydsl_fail("GPU module init failed with error " + std::to_string(err));
+// The status an exported entry or lifecycle function returns: 0, -1 (module
+// not initialized), -2 (not loaded on the device) or a hipError_t.
+void flydsl_check_status(int32_t status, const char* what) {
+  if (status == 0) {
+    return;
   }
-  load(&module, &err);
-  if (err != 0 || module == nullptr) {
-    flydsl_fail("GPU module load failed with error " + std::to_string(err));
+  // The FlyDSL runtime leaves a failed load's or launch's error pending, and
+  // the process's next HIP call would fail with it.
+  (void)hipGetLastError();
+  std::string reason;
+  if (status == -1) {
+    reason = "GPU module not initialized";
+  } else if (status == -2) {
+    reason = "GPU module not loaded on the current device";
+  } else {
+    reason = hipGetErrorName(static_cast<hipError_t>(status));
   }
+  flydsl_fail(std::string(what) + " failed: " + reason);
 }
 
 torch::stable::Tensor flydsl_required(
@@ -87,97 +86,12 @@ void flydsl_put(uint8_t* buffer, size_t buffer_size, size_t offset, T value) {
   std::copy(bytes.begin(), bytes.end(), buffer + offset);
 }
 
-void flydsl_check(hipError_t err, const char* what) {
-  if (err != hipSuccess) {
-    flydsl_fail(std::string(what) + " failed: " + hipGetErrorName(err));
-  }
-}
-
-// A HIP module only runs on the device it was loaded on, so the embedded image
-// is loaded once per device, on that device's first launch.
-struct FlydslModule {
-  const void* image;
-  std::mutex mutex;
-  std::unordered_map<int, hipModule_t> loaded;
-};
-
-hipModule_t flydsl_module_on(FlydslModule& module, int device) {
-  std::lock_guard<std::mutex> lock(module.mutex);
-  if (auto it = module.loaded.find(device); it != module.loaded.end()) {
-    return it->second;
-  }
-  hipModule_t handle = nullptr;
-  flydsl_check(hipModuleLoadData(&handle, module.image), "hipModuleLoadData");
-  module.loaded.emplace(device, handle);
-  return handle;
-}
-
 // __FLYDSL_AOT_GENERATE_BEGIN__ OP_FN
 void flydsl_op() {}
 void flydsl_dummy_op() {}
 // __FLYDSL_AOT_GENERATE_END__ OP_FN
 
 } // namespace
-
-// The MLIR GPU runtime functions the launcher object calls (signatures from
-// mlir/lib/ExecutionEngine/RocmRuntimeWrappers.cpp). Defined here rather than
-// linked from FlyDSL's runtime libraries, so the .so is self-contained.
-
-// Called once per variant, from its module load function; lives for the
-// process.
-extern "C" void* mgpuModuleLoad(void* image, size_t /*size*/) {
-  return new FlydslModule{image, {}, {}};
-}
-
-// Called on every launch. ``name`` points at a constant in the launcher object.
-extern "C" hipFunction_t mgpuModuleGetFunction(void* module, const char* name) {
-  int device = 0;
-  flydsl_check(hipGetDevice(&device), "hipGetDevice");
-  using Key = std::tuple<void*, int, const char*>;
-  thread_local std::map<Key, hipFunction_t> functions;
-  const Key key{module, device, name};
-  if (auto it = functions.find(key); it != functions.end()) {
-    return it->second;
-  }
-  hipFunction_t function = nullptr;
-  flydsl_check(
-      hipModuleGetFunction(
-          &function,
-          flydsl_module_on(*static_cast<FlydslModule*>(module), device),
-          name),
-      "hipModuleGetFunction");
-  functions.emplace(key, function);
-  return function;
-}
-
-extern "C" void mgpuLaunchKernel(
-    hipFunction_t function,
-    intptr_t grid_x,
-    intptr_t grid_y,
-    intptr_t grid_z,
-    intptr_t block_x,
-    intptr_t block_y,
-    intptr_t block_z,
-    int32_t shared_mem,
-    hipStream_t stream,
-    void** params,
-    void** extra,
-    size_t /*params_count*/) {
-  flydsl_check(
-      hipModuleLaunchKernel(
-          function,
-          grid_x,
-          grid_y,
-          grid_z,
-          block_x,
-          block_y,
-          block_z,
-          shared_mem,
-          stream,
-          params,
-          extra),
-      "hipModuleLaunchKernel");
-}
 
 STABLE_TORCH_LIBRARY_FRAGMENT(FLYDSL_OP_NAMESPACE, m) {
   m.def(FLYDSL_OP_SCHEMA);

@@ -42,9 +42,9 @@ def _variant(tag: str, condition: str, abi: tuple[AbiSlot, ...] = _ABI) -> FlyVa
         Variant(symbol, condition, f"fast={condition}"),
         ExportedLauncher(
             object_path=f"/out/{symbol}.o",
-            entry_symbol=f"{symbol}___mlir_launch",
-            module_init_symbol=f"{symbol}__flydsl_gpu_module_init",
-            module_load_symbol=f"{symbol}__flydsl_gpu_module_load_to_device",
+            entry_symbol=f"aott{symbol}",
+            module_init_symbol=f"aott{symbol}__module_init",
+            module_load_symbol=f"aott{symbol}__module_load",
             abi=abi,
         ),
     )
@@ -89,15 +89,25 @@ class GenerateTorchOpTest(unittest.TestCase):
         out = self._render(_FAST, _SLOW)
         for tag in ("aaaa", "bbbb"):
             symbol = f"{_OP}__{tag}"
-            self.assertIn(f'extern "C" void {symbol}___mlir_launch(void** args);', out)
+            exported = f"aott{symbol}"
+            for extern in (
+                f"int32_t {exported}(void** args);",
+                f"int32_t {exported}__module_init(void);",
+                f"int32_t {exported}__module_load(int32_t device);",
+            ):
+                self.assertIn(f'extern "C" {extern}', out)
             self.assertIn(f"void {symbol}_run(", out)
-            self.assertIn(
-                f"std::call_once(loaded, flydsl_load_module, "
-                f"{symbol}__flydsl_gpu_module_init, "
-                f"{symbol}__flydsl_gpu_module_load_to_device);",
-                out,
-            )
-            self.assertIn(f"{symbol}___mlir_launch(args);", out)
+            # Init once, load on the current device, then launch.
+            calls = [
+                f"std::call_once(initialized, [] {{ flydsl_check_status("
+                f'{exported}__module_init(), "{exported}__module_init"); }});',
+                f'flydsl_check_status({exported}__module_load(-1), "{exported}__module_load");',
+                f'flydsl_check_status({exported}(args), "{exported}");',
+            ]
+            for call in calls:
+                self.assertIn(call, out)
+            positions = [out.index(call) for call in calls]
+            self.assertEqual(positions, sorted(positions))
 
     def test_op_dispatches_on_the_variant_conditions(self) -> None:
         out = self._render(_FAST, _SLOW)
@@ -123,6 +133,25 @@ class GenerateTorchOpTest(unittest.TestCase):
         self.assertIn("x.size(0)", out)
         self.assertIn("flydsl_put<int32_t>(slot1, sizeof(slot1), 4, ", out)
         self.assertIn("flydsl_put<int64_t>(slot1, sizeof(slot1), 8, x.stride(0));", out)
+
+    def test_layout_bytes_follow_the_abi_widths(self) -> None:
+        wide = AbiSlot(
+            "tensor_layout",
+            "x",
+            "bytes",
+            12,
+            shape_dims=(0,),
+            stride_dims=(0,),
+            shape_bits=64,
+            stride_bits=32,
+        )
+        abi = tuple(wide if s.kind == "tensor_layout" else s for s in _ABI)
+        out = self._render(_variant("dddd", "true", abi))
+        self.assertIn("flydsl_put<int64_t>(slot1, sizeof(slot1), 0, x.size(0));", out)
+        self.assertIn(
+            'flydsl_put<int32_t>(slot1, sizeof(slot1), 8, flydsl_i32(x.stride(0), "x.stride(0)"));',
+            out,
+        )
 
     def test_checks_the_layout_the_launcher_was_compiled_for(self) -> None:
         out = self._render()

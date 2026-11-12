@@ -50,6 +50,11 @@ DEFAULT_OP_NAMESPACE_PREFIX: str = "aot_tensor"
 AOTT_NS_FORWARD_TAG: str = "_f_"
 AOTT_NS_MERGE_TAG: str = "_m_"
 
+# Prefixes the symbols a FlyDSL launcher object exports. FlyDSL's export_to_c
+# refuses names reserved to the C implementation, and op names start with an
+# underscore.
+FLYDSL_SYMBOL_PREFIX: str = "aott"
+
 # Marks compiler output so tooling skips it -- linters cannot resolve
 # compilation flags for generated C++ (no buck target owns it) and would
 # otherwise report that on every diff. Assembled at runtime so the modules
