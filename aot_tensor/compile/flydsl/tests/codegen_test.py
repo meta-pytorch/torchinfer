@@ -7,9 +7,10 @@ import unittest
 
 from aot_tensor.arg_specs.common import ConstexprArg, ScalarArg
 from aot_tensor.arg_specs.fly import FlyArgSpec, FlyTensorArg
+from aot_tensor.autotune.routing import RoutingTable
 from aot_tensor.compile.flydsl.abi import AbiSlot, ExportedLauncher
 from aot_tensor.compile.flydsl.codegen import FlyVariant, generate_torch_op_content
-from aot_tensor.compile.spec_selector import Variant
+from aot_tensor.compile.spec_selector import Route, Variant
 from aot_tensor.constants import DEFAULT_OP_NAMESPACE_PREFIX
 from parameterized import parameterized
 
@@ -54,10 +55,19 @@ _FAST = _variant("aaaa", "fast == true")
 _SLOW = _variant("bbbb", "fast == false")
 
 
+def _route(fly: FlyVariant) -> Route:
+    variant = fly.variant
+    return Route(
+        variant.condition, variant.description, RoutingTable({(): variant.symbol})
+    )
+
+
 class GenerateTorchOpTest(unittest.TestCase):
     def _render(self, *variants: FlyVariant) -> str:
+        variants = variants or (_FAST,)
+        routes = [_route(fly) for fly in variants]
         return generate_torch_op_content(
-            _OP, _SPECS, list(variants or (_FAST,)), frozenset({"x"})
+            _OP, _SPECS, list(variants), frozenset({"x"}), routes
         )
 
     @parameterized.expand(
@@ -69,7 +79,7 @@ class GenerateTorchOpTest(unittest.TestCase):
     def test_namespace_and_schema(
         self, _name: str, mutated: frozenset[str], tensor: str
     ) -> None:
-        out = generate_torch_op_content(_OP, _SPECS, [_FAST], mutated)
+        out = generate_torch_op_content(_OP, _SPECS, [_FAST], mutated, [_route(_FAST)])
         self.assertIn(f"#define FLYDSL_OP_NAMESPACE {DEFAULT_OP_NAMESPACE_PREFIX}", out)
         self.assertIn(
             f'#define FLYDSL_OP_SCHEMA "{_OP}({tensor}, SymInt n, bool fast) -> ()"',

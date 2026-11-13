@@ -24,7 +24,7 @@ from aot_tensor.compile.cutedsl.codegen import (
     make_variant,
     validate_cutedsl_op,
 )
-from aot_tensor.compile.spec_selector import distinct_variants
+from aot_tensor.compile.spec_selector import distinct_variants, variant_routes
 from aot_tensor.types import CuTeAOT
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -79,6 +79,12 @@ def compile_cutedsl_to_cpp(
     sidecar_so_name = f"{op.name.lstrip('_')}_cutedsl_impl.so"
     with open(os.path.join(install_dir, f"{op.name}_torch_op.cpp"), "w") as fp:
         fp.write(
-            generate_torch_op_content(op.name, codegens, variants, sidecar_so_name)
+            generate_torch_op_content(
+                op.name,
+                codegens,
+                variants,
+                sidecar_so_name,
+                variant_routes([cute.variant for cute in variants]),
+            )
         )
     return [os.path.join(install_dir, f"{cute.variant.symbol}.o") for cute in variants]

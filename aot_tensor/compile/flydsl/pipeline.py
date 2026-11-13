@@ -29,7 +29,7 @@ from aot_tensor.compile.adapter_base import hash_spec
 from aot_tensor.compile.flydsl.abi import ExportedLauncher
 from aot_tensor.compile.flydsl.aot import export_launcher
 from aot_tensor.compile.flydsl.codegen import FlyVariant, generate_torch_op_content
-from aot_tensor.compile.spec_selector import distinct_variants
+from aot_tensor.compile.spec_selector import distinct_variants, variant_routes
 from aot_tensor.constants import FLYDSL_SYMBOL_PREFIX
 from aot_tensor.types import FlyAOT
 
@@ -65,5 +65,10 @@ def compile_flydsl_to_cpp(
         variants.append(FlyVariant(variant, exported))
 
     with open(os.path.join(install_dir, f"{op.name}_torch_op.cpp"), "w") as fp:
-        fp.write(generate_torch_op_content(op.name, op.arg_specs, variants, op.mutated))
+        routes = variant_routes([fly.variant for fly in variants])
+        fp.write(
+            generate_torch_op_content(
+                op.name, op.arg_specs, variants, op.mutated, routes
+            )
+        )
     return [fly.exported for fly in variants]

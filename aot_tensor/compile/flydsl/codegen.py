@@ -15,7 +15,7 @@ from typing import Any
 from aot_tensor.arg_specs.common import ConstexprArg, ScalarArg
 from aot_tensor.arg_specs.fly import FlyArgSpec, FlyTensorArg
 from aot_tensor.compile.flydsl.abi import AbiSlot, C_IDENTIFIER, ExportedLauncher
-from aot_tensor.compile.spec_selector import render_selector, Variant
+from aot_tensor.compile.spec_selector import render_selector, Route, Variant
 from aot_tensor.compile.template_utils import FLYDSL_TEMPLATES
 from aot_tensor.constants import DEFAULT_OP_NAMESPACE_PREFIX
 
@@ -286,6 +286,7 @@ def generate_torch_op_content(
     arg_specs: list[FlyArgSpec],
     variants: list[FlyVariant],
     mutated: frozenset[str],
+    routes: list[Route],
 ) -> str:
     _validate_specs(op_name, arg_specs)
     specs = _Specs(
@@ -302,7 +303,7 @@ def generate_torch_op_content(
     call_args = ", ".join(spec.name for spec in arg_specs)
 
     selector = render_selector(
-        [fly.variant for fly in variants],
+        routes,
         {
             fly.variant.symbol: f"{fly.variant.symbol}_run({call_args})"
             for fly in variants

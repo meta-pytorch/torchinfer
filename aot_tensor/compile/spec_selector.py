@@ -25,6 +25,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
+from aot_tensor.autotune.routing import RoutingTable
 from aot_tensor.compile.stable_types import TORCH_DTYPE_TO_STABLE
 
 _T = TypeVar("_T")
@@ -121,20 +122,33 @@ def distinct_variants(
     return variants
 
 
-def render_selector(
-    variants: list[Variant], call: dict[str, str], fail: str
-) -> list[str]:
-    """Statements dispatching to ``call[v.symbol]`` for the first matching
-    variant; ``fail`` is a function taking the no-match message."""
+@dataclass(frozen=True)
+class Route:
+    """One branch of the generated selector: a call matching ``condition`` runs
+    the variant its key picks from ``table``."""
+
+    condition: str
+    description: str
+    # log2 bucket per key -> variant symbol; one entry needs no key.
+    table: RoutingTable[str]
+
+
+def variant_routes(variants: list[Variant]) -> list[Route]:
+    """One route per variant."""
+    return [
+        Route(v.condition, v.description, RoutingTable({(): v.symbol}))
+        for v in variants
+    ]
+
+
+def render_selector(routes: list[Route], call: dict[str, str], fail: str) -> list[str]:
+    """Statements dispatching to ``call[symbol]`` for the first matching route;
+    ``fail`` is a function taking the no-match message."""
     lines: list[str] = []
-    for variant in variants:
-        lines += [
-            f"if ({variant.condition}) {{",
-            f"  {call[variant.symbol]};",
-            "  return;",
-            "}",
-        ]
-    compiled = "; ".join(v.description for v in variants)
+    for route in routes:
+        (symbol,) = route.table.entries.values()
+        lines += [f"if ({route.condition}) {{", f"  {call[symbol]};", "  return;", "}"]
+    compiled = "; ".join(route.description for route in routes)
     message = f"no compiled specialization matches the arguments; compiled: {compiled}"
     lines.append(f"{fail}({_quote(message)});")
     return lines

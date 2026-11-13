@@ -49,7 +49,7 @@ from typing import Any, Callable, Generic, TypeVar
 import torch
 from aot_tensor.arg_specs.common import ConstexprArg, ScalarArg
 from aot_tensor.arg_specs.cute import CuTeArgSpec, CuTeTensorArg
-from aot_tensor.compile.spec_selector import render_selector, Variant
+from aot_tensor.compile.spec_selector import render_selector, Route, Variant
 from aot_tensor.compile.template_utils import CUTEDSL_TEMPLATES
 from aot_tensor.constants import DEFAULT_OP_NAMESPACE_PREFIX
 
@@ -587,6 +587,7 @@ def generate_torch_op_content(
     codegens: list[ArgCodegen[Any]],
     variants: list[CuTeVariant],
     sidecar_so_name: str,
+    routes: list[Route],
 ) -> str:
     cpp_params = ", ".join(cg.torch_cpp_param() for cg in codegens)
     op_params = ", ".join(cg.torch_op_param() for cg in codegens)
@@ -595,7 +596,7 @@ def generate_torch_op_content(
     )
     call_args = ", ".join(cg.name for cg in codegens)
     selector = render_selector(
-        [cute.variant for cute in variants],
+        routes,
         {
             cute.variant.symbol: f"{cute.variant.symbol}_run({call_args})"
             for cute in variants

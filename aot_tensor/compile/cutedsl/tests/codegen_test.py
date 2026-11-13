@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 
 from aot_tensor.arg_specs.common import ConstexprArg, RawSpec, ScalarArg
 from aot_tensor.arg_specs.cute import CuTeTensorArg
+from aot_tensor.autotune.routing import RoutingTable
 from aot_tensor.compile.cutedsl import pipeline as cutedsl_mod
 from aot_tensor.compile.cutedsl.codegen import (
     _SCALAR_DTYPES,
@@ -40,7 +41,7 @@ from aot_tensor.compile.cutedsl.codegen import (
     validate_cutedsl_op,
 )
 from aot_tensor.compile.cutedsl.pipeline import compile_cutedsl_to_cpp
-from aot_tensor.compile.spec_selector import Variant
+from aot_tensor.compile.spec_selector import Route, Variant
 from aot_tensor.constants import DEFAULT_OP_NAMESPACE_PREFIX
 from parameterized import parameterized
 
@@ -364,7 +365,20 @@ class GenerateContentTest(unittest.TestCase):
         self.assertEqual(out.count("const int64_t* x_strides"), 1)
 
     def test_torch_op(self) -> None:
-        out = generate_torch_op_content("op", _CODEGENS, [_F32, _F16], "impl.so")
+        out = generate_torch_op_content(
+            "op",
+            _CODEGENS,
+            [_F32, _F16],
+            "impl.so",
+            [
+                Route(
+                    c.variant.condition,
+                    c.variant.description,
+                    RoutingTable({(): c.variant.symbol}),
+                )
+                for c in (_F32, _F16)
+            ],
+        )
         self.assertIn(
             f"#define CUTEDSL_OP_NAMESPACE {DEFAULT_OP_NAMESPACE_PREFIX}\n", out
         )

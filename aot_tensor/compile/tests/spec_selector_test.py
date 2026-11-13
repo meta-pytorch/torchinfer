@@ -16,6 +16,7 @@ from aot_tensor.compile.spec_selector import (
     match_condition,
     render_selector,
     Variant,
+    variant_routes,
 )
 from parameterized import parameterized
 
@@ -114,7 +115,9 @@ class RenderSelectorTest(unittest.TestCase):
             Variant("op__b", "fast == false", "fast=False"),
         ]
         lines = render_selector(
-            variants, {"op__a": "op__a_run(x)", "op__b": "op__b_run(x)"}, "fail"
+            variant_routes(variants),
+            {"op__a": "op__a_run(x)", "op__b": "op__b_run(x)"},
+            "fail",
         )
         self.assertEqual(
             lines,
