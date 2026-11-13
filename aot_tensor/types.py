@@ -27,6 +27,7 @@ import triton
 from aot_tensor.arg_specs.common import module_basename_for_callable
 from aot_tensor.arg_specs.cute import CuTeArgSpec
 from aot_tensor.arg_specs.fly import FlyArgSpec, FlyTensorArg
+from aot_tensor.autotune.autotune import Autotune
 from aot_tensor.compile.triton.utils import is_autotuner, is_heuristics
 from triton.compiler import make_backend
 from triton.runtime.autotuner import Autotuner, Heuristics
@@ -288,10 +289,12 @@ class CuTeAOT(AOTTMarker, metaclass=AOTTMarkerMeta):
         self,
         jit_fn: Callable[..., Any],
         arg_specs: list[CuTeArgSpec],
+        autotune: Autotune | None = None,
     ) -> None:
         self.name: str = _default_cutedsl_op_name(jit_fn)
         self.jit_fn: Callable[..., Any] = jit_fn
         self.arg_specs: list[CuTeArgSpec] = arg_specs
+        self.autotune: Autotune | None = autotune
         self.module_basename: str = module_basename_for_callable(jit_fn)
 
         if not self.name or not self.name.replace("_", "").isalnum():
@@ -299,8 +302,13 @@ class CuTeAOT(AOTTMarker, metaclass=AOTTMarkerMeta):
                 f"CuTeAOT: derived invalid op name {self.name!r} from "
                 f"kernel {type(jit_fn).__name__!r}."
             )
+        if autotune is not None:
+            autotune.check(arg_specs, self.name)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        if self.autotune is not None:
+            kwargs = self.autotune.resolve(self.arg_specs, self.name, *args, **kwargs)
+            args = ()
         # Read via the class (see ``TritonAOT.run``) to avoid double-binding.
         collector = type(self).spec_collector
         if collector is not None:
@@ -334,12 +342,14 @@ class FlyAOT(AOTTMarker, metaclass=AOTTMarkerMeta):
         jit_fn: Any,
         arg_specs: list[FlyArgSpec],
         mutates_args: Iterable[str] | Literal["unknown"] = "unknown",
+        autotune: Autotune | None = None,
     ) -> None:
         # A @flyc.jit JitFunction keeps the user function on ``.func``.
         fn: Any = jit_fn.func
         self.name: str = f"_flydsl_{fn.__name__}"
         self.jit_fn: Any = jit_fn
         self.arg_specs: list[FlyArgSpec] = arg_specs
+        self.autotune: Autotune | None = autotune
         self.module_basename: str = module_basename_for_callable(fn)
 
         if not self.name.replace("_", "").isalnum():
@@ -355,8 +365,13 @@ class FlyAOT(AOTTMarker, metaclass=AOTTMarkerMeta):
                 f"FlyAOT {self.name}: mutates_args {sorted(self.mutated - tensors)} "
                 f"are not tensor args {sorted(tensors)}."
             )
+        if autotune is not None:
+            autotune.check(arg_specs, self.name)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        if self.autotune is not None:
+            kwargs = self.autotune.resolve(self.arg_specs, self.name, *args, **kwargs)
+            args = ()
         collector = type(self).spec_collector
         if collector is not None:
             collector(self, *args, **kwargs)
@@ -388,16 +403,23 @@ def triton_aot(
 def cutedsl_aot(
     jit_fn: Callable[..., Any],
     arg_specs: list[CuTeArgSpec],
+    autotune: Autotune | None = None,
 ) -> CuTeAOT:
-    return CuTeAOT(jit_fn=jit_fn, arg_specs=arg_specs)
+    return CuTeAOT(jit_fn=jit_fn, arg_specs=arg_specs, autotune=autotune)
 
 
 def flydsl_aot(
     jit_fn: Any,
     arg_specs: list[FlyArgSpec],
     mutates_args: Iterable[str] | Literal["unknown"] = "unknown",
+    autotune: Autotune | None = None,
 ) -> FlyAOT:
-    return FlyAOT(jit_fn=jit_fn, arg_specs=arg_specs, mutates_args=mutates_args)
+    return FlyAOT(
+        jit_fn=jit_fn,
+        arg_specs=arg_specs,
+        mutates_args=mutates_args,
+        autotune=autotune,
+    )
 
 
 def get_all_triton_aot_instances() -> List[TritonAOT]:

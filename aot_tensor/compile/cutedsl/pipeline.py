@@ -45,6 +45,10 @@ def compile_cutedsl_to_cpp(
 
     if torch.version.hip is not None:
         raise NotImplementedError("CuTeDSL AOT is only supported on NVIDIA CUDA.")
+    if op.autotune is not None:
+        raise NotImplementedError(
+            f"CuTeDSL AOT {op.name}: autotune is eager-only so far."
+        )
     # TODO: share the torch-op arg codegen (scalar/constexpr tables, schema,
     # C++ params) with FlyDSL.
 

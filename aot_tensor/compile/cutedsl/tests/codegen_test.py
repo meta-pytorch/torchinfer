@@ -472,6 +472,7 @@ class CompileCuTeDSLToCppTest(unittest.TestCase):
         op = SimpleNamespace(
             name="_cutedsl_vector_add",
             arg_specs=[CuTeTensorArg("x"), ScalarArg("n", "i32")],
+            autotune=None,
             jit_fn=lambda *a: None,
         )
         specs = [

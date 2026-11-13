@@ -43,6 +43,10 @@ def compile_flydsl_to_cpp(
 ) -> list[ExportedLauncher]:
     """Export one launcher object per distinct specialization and generate the
     torch op dispatching between them; returns the objects to link."""
+    if op.autotune is not None:
+        raise NotImplementedError(
+            f"FlyDSL AOT {op.name}: autotune is eager-only so far."
+        )
     os.makedirs(install_dir, exist_ok=True)
     keyed = [(spec, hash_spec(spec.hash_key), spec.hash_key) for spec in specs]
     variants: list[FlyVariant] = []
