@@ -588,7 +588,9 @@ def generate_torch_op_content(
     variants: list[CuTeVariant],
     sidecar_so_name: str,
     routes: list[Route],
+    keys: tuple[str, ...],
 ) -> str:
+    """``codegens``: the op params. ``keys``: the C++ autotune key values."""
     cpp_params = ", ".join(cg.torch_cpp_param() for cg in codegens)
     op_params = ", ".join(cg.torch_op_param() for cg in codegens)
     schema_params = ", ".join(
@@ -597,6 +599,7 @@ def generate_torch_op_content(
     call_args = ", ".join(cg.name for cg in codegens)
     selector = render_selector(
         routes,
+        keys,
         {
             cute.variant.symbol: f"{cute.variant.symbol}_run({call_args})"
             for cute in variants

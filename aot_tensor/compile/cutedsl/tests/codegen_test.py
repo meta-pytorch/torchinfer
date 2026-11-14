@@ -378,6 +378,7 @@ class GenerateContentTest(unittest.TestCase):
                 )
                 for c in (_F32, _F16)
             ],
+            (),
         )
         self.assertIn(
             f"#define CUTEDSL_OP_NAMESPACE {DEFAULT_OP_NAMESPACE_PREFIX}\n", out

@@ -47,6 +47,31 @@ int32_t cutedsl_i32(int64_t value, const char* name) {
   return static_cast<int32_t>(value);
 }
 
+// Autotune routing (autotune/routing.py): the index of the entry nearest to
+// the keys' log2 buckets, the earlier entry on a tie.
+template <size_t N, size_t K>
+size_t aott_nearest_entry(
+    const int64_t (&entries)[N][K],
+    const int64_t (&keys)[K]) {
+  size_t nearest = 0;
+  int64_t nearest_distance = std::numeric_limits<int64_t>::max();
+  for (size_t i = 0; i < N; ++i) {
+    int64_t distance = 0;
+    for (size_t k = 0; k < K; ++k) {
+      // The power-of-2 bucket holding the value, as its log2; <= 1 shares 0.
+      const int64_t bucket = keys[k] <= 1
+          ? 0
+          : 64 - __builtin_clzll(static_cast<uint64_t>(keys[k] - 1));
+      distance += (bucket - entries[i][k]) * (bucket - entries[i][k]);
+    }
+    if (distance < nearest_distance) {
+      nearest = i;
+      nearest_distance = distance;
+    }
+  }
+  return nearest;
+}
+
 CUstream cutedsl_aot_get_current_stream() {
   auto device_idx = torch::stable::accelerator::getCurrentDeviceIndex();
   void* stream_ptr = nullptr;

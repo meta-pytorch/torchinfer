@@ -304,6 +304,7 @@ def generate_torch_op_content(
 
     selector = render_selector(
         routes,
+        (),
         {
             fly.variant.symbol: f"{fly.variant.symbol}_run({call_args})"
             for fly in variants

@@ -59,8 +59,10 @@ class CutedslTemplateTest(unittest.TestCase):
         self.assertIn("dladdr", torch_op)
         self.assertIn("cutedsl_sidecar_path", torch_op)
         self.assertIn("cutedsl_load_entry", torch_op)
-        # The variant selector's no-match handler and the checked i32 narrowing.
+        # The variant selector's no-match handler and nearest autotune entry,
+        # and the checked i32 narrowing.
         self.assertIn("cutedsl_fail", torch_op)
+        self.assertIn("aott_nearest_entry", torch_op)
         self.assertIn("cutedsl_i32", torch_op)
         # Sidecar resolved relative to this .so, never an absolute build path.
         self.assertNotIn("/tmp", torch_op)

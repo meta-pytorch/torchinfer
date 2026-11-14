@@ -6,8 +6,16 @@ import unittest
 from typing import Any
 
 import torch
-from aot_tensor.arg_specs.common import ConstexprArg, sample_spec_and_hash, ScalarArg
+from aot_tensor.arg_specs.common import (
+    ArgSpec,
+    ConstexprArg,
+    RawSpec,
+    sample_spec_and_hash,
+    ScalarArg,
+)
 from aot_tensor.arg_specs.fly import FlyTensorArg
+from aot_tensor.autotune.autotune import Autotune
+from aot_tensor.autotune.routing import RoutingTable
 from aot_tensor.compile.adapter_base import hash_spec
 from aot_tensor.compile.spec_selector import (
     cpp_literal,
@@ -15,6 +23,7 @@ from aot_tensor.compile.spec_selector import (
     distinct_variants,
     match_condition,
     render_selector,
+    Route,
     Variant,
     variant_routes,
 )
@@ -108,19 +117,83 @@ class DistinctVariantsTest(unittest.TestCase):
             distinct_variants("op", [(0, "deadbeef01", on), (1, "deadbeef02", off)])
 
 
-class RenderSelectorTest(unittest.TestCase):
-    def test_dispatches_in_order_then_fails(self) -> None:
-        variants = [
-            Variant("op__a", "fast == true", "fast=True"),
-            Variant("op__b", "fast == false", "fast=False"),
-        ]
-        lines = render_selector(
-            variant_routes(variants),
-            {"op__a": "op__a_run(x)", "op__b": "op__b_run(x)"},
-            "fail",
-        )
+_TUNED_SPECS: list[ArgSpec] = [
+    FlyTensorArg("x"),
+    ScalarArg("n", "i32"),
+    ConstexprArg("NEG", bool),
+    ConstexprArg("BM", int),
+]
+# Buckets 16 (log2 4) and 1024 (log2 10); BM=2 is not valid with NEG.
+_AUTOTUNE = Autotune(
+    key=[("x", 0)],
+    tuned={16: {"BM": 1}, 1024: {"BM": 2}},
+    valid=lambda config, constexprs: not (constexprs["NEG"] and config["BM"] == 2),
+)
+
+
+def _collected(m: int, neg: bool) -> RawSpec:
+    """The spec a marker collects for this call: BM filled from ``tuned``."""
+    values = _AUTOTUNE.resolve(_TUNED_SPECS, "op", torch.empty(m), m, NEG=neg)
+    spec, _ = sample_spec_and_hash(_TUNED_SPECS, "op", "mod", **values)
+    return spec
+
+
+class VariantRoutesTest(unittest.TestCase):
+    def test_one_route_per_variant_without_autotune(self) -> None:
+        on, off = _key(torch.empty(8), True), _key(torch.empty(8), False)
+        keyed = [(i, hash_spec(k), k) for i, k in enumerate([on, off])]
+        variants = [v for _, v in distinct_variants("op", keyed)]
+        routes = variant_routes("op", [(on, variants[0]), (off, variants[1])], None)
         self.assertEqual(
-            lines,
+            routes,
+            [
+                Route(v.condition, v.description, RoutingTable({(): v.symbol}))
+                for v in variants
+            ],
+        )
+
+    def test_autotuned_variants_share_a_route_per_caller_match(self) -> None:
+        # One collected M per NEG; expand compiles every config valid for each.
+        specs = _AUTOTUNE.expand(
+            [_collected(4096, False), _collected(8, True)], _TUNED_SPECS, "op"
+        )
+        keyed = [(s, hash_spec(s.hash_key), s.hash_key) for s in specs]
+        compiled = distinct_variants("op", keyed)
+        x = "x: torch.float32 rank 1 unit-stride dim 0"
+        self.assertEqual(
+            [v.description for _, v in compiled],
+            [f"{x}, NEG=False, BM=1", f"{x}, NEG=False, BM=2", f"{x}, NEG=True, BM=1"],
+        )
+        a, b, c = (v.symbol for _, v in compiled)
+        routes = variant_routes("op", [(s.hash_key, v) for s, v in compiled], _AUTOTUNE)
+        caller = f"x.scalar_type() == {_FLOAT} && x.dim() == 1 && x.stride(0) == 1"
+        self.assertEqual(
+            routes,
+            [
+                Route(
+                    f"{caller} && NEG == false",
+                    f"{x}, NEG=False",
+                    RoutingTable({(4,): a, (10,): b}),
+                ),
+                Route(
+                    f"{caller} && NEG == true",
+                    f"{x}, NEG=True",
+                    RoutingTable({(4,): c}),
+                ),
+            ],
+        )
+
+
+class RenderSelectorTest(unittest.TestCase):
+    CALL: dict[str, str] = {"op__a": "op__a_run(x)", "op__b": "op__b_run(x)"}
+
+    def test_dispatches_in_order_then_fails(self) -> None:
+        routes = [
+            Route("fast == true", "fast=True", RoutingTable({(): "op__a"})),
+            Route("fast == false", "fast=False", RoutingTable({(): "op__b"})),
+        ]
+        self.assertEqual(
+            render_selector(routes, (), self.CALL, "fail"),
             [
                 "if (fast == true) {",
                 "  op__a_run(x);",
@@ -132,5 +205,33 @@ class RenderSelectorTest(unittest.TestCase):
                 "}",
                 'fail("no compiled specialization matches the arguments; '
                 'compiled: fast=True; fast=False");',
+            ],
+        )
+
+    def test_route_with_variants_takes_the_nearest_entry(self) -> None:
+        table = RoutingTable({(4,): "op__a", (10,): "op__b", (13,): "op__a"})
+        lines = render_selector(
+            [Route("NEG == false", "NEG=False", table)],
+            ("x.size(0)",),
+            self.CALL,
+            "fail",
+        )
+        self.assertEqual(
+            lines,
+            [
+                "if (NEG == false) {",
+                "  static constexpr int64_t aott_entries[3][1] = {{4}, {10}, {13}};",
+                "  const int64_t aott_keys[] = {x.size(0)};",
+                "  switch (aott_nearest_entry(aott_entries, aott_keys)) {",
+                "    case 1:",
+                "      op__b_run(x);",
+                "      return;",
+                "    default:",
+                "      op__a_run(x);",
+                "      return;",
+                "  }",
+                "}",
+                'fail("no compiled specialization matches the arguments; '
+                'compiled: NEG=False");',
             ],
         )

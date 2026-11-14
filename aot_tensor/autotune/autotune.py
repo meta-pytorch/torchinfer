@@ -13,7 +13,9 @@ from typing import Any
 from aot_tensor.arg_specs.common import (
     ArgSpec,
     ConstexprArg,
+    RawSpec,
     resolve_runtime_args,
+    sample_spec_and_hash,
     ScalarArg,
     TensorArg,
 )
@@ -116,6 +118,28 @@ class Autotune:
         values = resolve_runtime_args(caller_specs, op_name, *args, **kwargs)
         routing = self.routing_for(self.other_constexprs(arg_specs, values), op_name)
         return values | routing.select(self.key_values(values, op_name))
+
+    def expand(
+        self, specs: Sequence[RawSpec], arg_specs: Sequence[ArgSpec], op_name: str
+    ) -> list[RawSpec]:
+        """Each collected spec once per config its tuned entries can use, so
+        every key value of the spec has a compiled variant."""
+        expanded: dict[str, RawSpec] = {}
+        for spec in specs:
+            values = resolve_runtime_args(
+                arg_specs, op_name, *spec.runtime_args, **spec.runtime_kwargs
+            )
+            routing = self.routing_for(
+                self.other_constexprs(arg_specs, values), op_name
+            )
+            for config in routing.entries.values():
+                raw, hashed = sample_spec_and_hash(
+                    arg_specs, op_name, spec.hash_key["jit_module"], **(values | config)
+                )
+                # The hash covers every constexpr, autotuned ones included, so
+                # this only merges specs that compile to the same variant.
+                expanded.setdefault(hashed, raw)
+        return list(expanded.values())
 
     def key_values(self, values: Mapping[str, Any], op_name: str) -> list[int]:
         """Each key's value in a call bound to ``values``."""

@@ -24,7 +24,11 @@ from aot_tensor.compile.cutedsl.codegen import (
     make_variant,
     validate_cutedsl_op,
 )
-from aot_tensor.compile.spec_selector import distinct_variants, variant_routes
+from aot_tensor.compile.spec_selector import (
+    distinct_variants,
+    key_exprs,
+    variant_routes,
+)
 from aot_tensor.types import CuTeAOT
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -45,10 +49,6 @@ def compile_cutedsl_to_cpp(
 
     if torch.version.hip is not None:
         raise NotImplementedError("CuTeDSL AOT is only supported on NVIDIA CUDA.")
-    if op.autotune is not None:
-        raise NotImplementedError(
-            f"CuTeDSL AOT {op.name}: autotune is eager-only so far."
-        )
     # TODO: share the torch-op arg codegen (scalar/constexpr tables, schema,
     # C++ params) with FlyDSL.
 
@@ -56,9 +56,12 @@ def compile_cutedsl_to_cpp(
     validate_cutedsl_op(codegens, op.name)
     os.makedirs(install_dir, exist_ok=True)
 
+    if op.autotune is not None:
+        specs = op.autotune.expand(specs, op.arg_specs, op.name)
     keyed = [(spec, hash_spec(spec.hash_key), spec.hash_key) for spec in specs]
+    to_compile = distinct_variants(op.name, keyed)
     variants: list[CuTeVariant] = []
-    for spec, variant in distinct_variants(op.name, keyed):
+    for spec, variant in to_compile:
         # cute.compile args: per-arg values (dlpack tensors with dynamic layout,
         # CuTeDSL scalars, passthrough constexprs) plus the current stream.
         values = resolve_runtime_args(
@@ -77,14 +80,20 @@ def compile_cutedsl_to_cpp(
         fp.write(generate_sidecar_entry_content(op.name, codegens, variants))
 
     sidecar_so_name = f"{op.name.lstrip('_')}_cutedsl_impl.so"
+    # Autotuned constexprs are baked into the variants, not op params.
+    autotuned = frozenset() if op.autotune is None else op.autotune.constexpr_names
+    op_codegens = [cg for cg in codegens if cg.name not in autotuned]
     with open(os.path.join(install_dir, f"{op.name}_torch_op.cpp"), "w") as fp:
         fp.write(
             generate_torch_op_content(
                 op.name,
-                codegens,
+                op_codegens,
                 variants,
                 sidecar_so_name,
-                variant_routes([cute.variant for cute in variants]),
+                variant_routes(
+                    op.name, [(s.hash_key, v) for s, v in to_compile], op.autotune
+                ),
+                key_exprs(op.autotune),
             )
         )
     return [os.path.join(install_dir, f"{cute.variant.symbol}.o") for cute in variants]

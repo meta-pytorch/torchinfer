@@ -6,7 +6,13 @@ import unittest
 from typing import Any
 
 import torch
-from aot_tensor.arg_specs.common import ArgSpec, ConstexprArg, ScalarArg, TensorArg
+from aot_tensor.arg_specs.common import (
+    ArgSpec,
+    ConstexprArg,
+    sample_spec_and_hash,
+    ScalarArg,
+    TensorArg,
+)
 from aot_tensor.autotune.autotune import Autotune
 from parameterized import parameterized
 
@@ -53,6 +59,21 @@ class AutotuneTest(unittest.TestCase):
         x = torch.empty(4096)
         self.assertEqual(autotune.resolve(_AUTOTUNE_SPECS, "op", x, 1, True)["BM"], 1)
         self.assertEqual(autotune.resolve(_AUTOTUNE_SPECS, "op", x, 1, False)["BM"], 2)
+
+    def test_expand_adds_every_config_valid_for_each_spec(self) -> None:
+        autotune = _autotune(valid=lambda cfg, c: not (c["NEG"] and cfg["BM"] == 2))
+        collected = []
+        for m, neg in ((4096, False), (8, False), (8, True)):
+            values = autotune.resolve(_AUTOTUNE_SPECS, "op", torch.empty(m), m, NEG=neg)
+            collected.append(
+                sample_spec_and_hash(_AUTOTUNE_SPECS, "op", "mod", **values)[0]
+            )
+        expanded = autotune.expand(collected, _AUTOTUNE_SPECS, "op")
+        # The two NEG=False specs share their hash per config; NEG=True can use only BM=1.
+        self.assertEqual(
+            [(s.runtime_kwargs["NEG"], s.runtime_kwargs["BM"]) for s in expanded],
+            [(False, 1), (False, 2), (True, 1)],
+        )
 
     def test_tuple_and_bare_int_buckets_agree(self) -> None:
         self.assertEqual(

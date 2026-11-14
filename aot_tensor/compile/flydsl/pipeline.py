@@ -49,8 +49,9 @@ def compile_flydsl_to_cpp(
         )
     os.makedirs(install_dir, exist_ok=True)
     keyed = [(spec, hash_spec(spec.hash_key), spec.hash_key) for spec in specs]
+    to_compile = distinct_variants(op.name, keyed)
     variants: list[FlyVariant] = []
-    for spec, variant in distinct_variants(op.name, keyed):
+    for spec, variant in to_compile:
         values = resolve_runtime_args(
             op.arg_specs, op.name, *spec.runtime_args, **spec.runtime_kwargs
         )
@@ -65,7 +66,9 @@ def compile_flydsl_to_cpp(
         variants.append(FlyVariant(variant, exported))
 
     with open(os.path.join(install_dir, f"{op.name}_torch_op.cpp"), "w") as fp:
-        routes = variant_routes([fly.variant for fly in variants])
+        routes = variant_routes(
+            op.name, [(s.hash_key, v) for s, v in to_compile], op.autotune
+        )
         fp.write(
             generate_torch_op_content(
                 op.name, op.arg_specs, variants, op.mutated, routes
