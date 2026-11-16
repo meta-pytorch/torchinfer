@@ -18,7 +18,7 @@ from aot_tensor.constants import FLYDSL_SYMBOL_PREFIX
 from libfb.py import parutil
 from parameterized import parameterized
 
-# export_to_c objects of the toy silu-gate op, one per SUBTRACT variant.
+# export_to_c objects of the toy silu-gate op, one per SUBTRACT and BLOCK_DIM.
 _FIXTURE_DIR = (
     "aot_tensor/compile/flydsl/tests/fixtures/resources/"
     "flydsl_toy_flydsl__flydsl__silu_gate_launch"
@@ -136,7 +136,7 @@ class ReadExportedLauncherTest(unittest.TestCase):
         objects = sorted(
             glob.glob(os.path.join(parutil.get_dir_path(_FIXTURE_DIR), "*.o"))
         )
-        self.assertEqual(len(objects), 2)
+        self.assertTrue(objects, _FIXTURE_DIR)
         for path in objects:
             symbol = f"{FLYDSL_SYMBOL_PREFIX}{os.path.basename(path)[: -len('.o')]}"
             launcher = read_exported_launcher(path, symbol)

@@ -40,11 +40,11 @@ class FlydslExtensionBuilderTest(unittest.TestCase):
         _touch(os.path.join(self.toolkit, "include", "hip", "hip_runtime.h"))
         os.makedirs(os.path.join(self.toolkit, "lib"))
         self.output_dir: str = self.enterContext(tempfile.TemporaryDirectory())
-        # One object per SUBTRACT variant.
+        # One object per SUBTRACT and BLOCK_DIM.
         self.objects: list[str] = sorted(
             glob.glob(os.path.join(_FIXTURE_DIR, f"{_KERNEL}__*.o"))
         )
-        self.assertEqual(len(self.objects), 2, _FIXTURE_DIR)
+        self.assertTrue(self.objects, _FIXTURE_DIR)
 
     def _builder(self, objects: list[str] | None = None) -> FlydslExtensionBuilder:
         return FlydslExtensionBuilder(

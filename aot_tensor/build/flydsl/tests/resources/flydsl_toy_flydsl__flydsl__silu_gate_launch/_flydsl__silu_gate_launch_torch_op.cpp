@@ -26,12 +26,18 @@
 // Exported by the FlyDSL export_to_c objects linked into this .so, one set per
 // specialization.
 // __FLYDSL_AOT_GENERATE_BEGIN__ EXTERNS
-extern "C" int32_t aott_flydsl__silu_gate_launch__a7aa8b8d(void** args);
-extern "C" int32_t aott_flydsl__silu_gate_launch__a7aa8b8d__module_init(void);
-extern "C" int32_t aott_flydsl__silu_gate_launch__a7aa8b8d__module_load(int32_t device);
-extern "C" int32_t aott_flydsl__silu_gate_launch__eeaad3b5(void** args);
-extern "C" int32_t aott_flydsl__silu_gate_launch__eeaad3b5__module_init(void);
-extern "C" int32_t aott_flydsl__silu_gate_launch__eeaad3b5__module_load(int32_t device);
+extern "C" int32_t aott_flydsl__silu_gate_launch__f9f92961(void** args);
+extern "C" int32_t aott_flydsl__silu_gate_launch__f9f92961__module_init(void);
+extern "C" int32_t aott_flydsl__silu_gate_launch__f9f92961__module_load(int32_t device);
+extern "C" int32_t aott_flydsl__silu_gate_launch__b3077446(void** args);
+extern "C" int32_t aott_flydsl__silu_gate_launch__b3077446__module_init(void);
+extern "C" int32_t aott_flydsl__silu_gate_launch__b3077446__module_load(int32_t device);
+extern "C" int32_t aott_flydsl__silu_gate_launch__dc8e9897(void** args);
+extern "C" int32_t aott_flydsl__silu_gate_launch__dc8e9897__module_init(void);
+extern "C" int32_t aott_flydsl__silu_gate_launch__dc8e9897__module_load(int32_t device);
+extern "C" int32_t aott_flydsl__silu_gate_launch__9ded6582(void** args);
+extern "C" int32_t aott_flydsl__silu_gate_launch__9ded6582__module_init(void);
+extern "C" int32_t aott_flydsl__silu_gate_launch__9ded6582__module_load(int32_t device);
 // __FLYDSL_AOT_GENERATE_END__ EXTERNS
 
 namespace {
@@ -85,6 +91,31 @@ int32_t flydsl_i32(int64_t value, const char* what) {
   return static_cast<int32_t>(value);
 }
 
+// Autotune routing (autotune/routing.py): the index of the entry nearest to
+// the keys' log2 buckets, the earlier entry on a tie.
+template <size_t N, size_t K>
+size_t aott_nearest_entry(
+    const int64_t (&entries)[N][K],
+    const int64_t (&keys)[K]) {
+  size_t nearest = 0;
+  int64_t nearest_distance = std::numeric_limits<int64_t>::max();
+  for (size_t i = 0; i < N; ++i) {
+    int64_t distance = 0;
+    for (size_t k = 0; k < K; ++k) {
+      // The power-of-2 bucket holding the value, as its log2; <= 1 shares 0.
+      const int64_t bucket = keys[k] <= 1
+          ? 0
+          : 64 - __builtin_clzll(static_cast<uint64_t>(keys[k] - 1));
+      distance += (bucket - entries[i][k]) * (bucket - entries[i][k]);
+    }
+    if (distance < nearest_distance) {
+      nearest = i;
+      nearest_distance = distance;
+    }
+  }
+  return nearest;
+}
+
 template <typename T>
 void flydsl_put(uint8_t* buffer, size_t buffer_size, size_t offset, T value) {
   if (offset > buffer_size || buffer_size - offset < sizeof(T)) {
@@ -95,10 +126,10 @@ void flydsl_put(uint8_t* buffer, size_t buffer_size, size_t offset, T value) {
 }
 
 // __FLYDSL_AOT_GENERATE_BEGIN__ OP_FN
-void _flydsl__silu_gate_launch__a7aa8b8d_run(torch::stable::Tensor A, torch::stable::Tensor B, torch::stable::Tensor C, torch::stable::Tensor Out, int64_t n, bool SUBTRACT) {
+void _flydsl__silu_gate_launch__f9f92961_run(torch::stable::Tensor A, torch::stable::Tensor B, torch::stable::Tensor C, torch::stable::Tensor Out, int64_t n, bool SUBTRACT) {
   static std::once_flag initialized;
-  std::call_once(initialized, [] { flydsl_check_status(aott_flydsl__silu_gate_launch__a7aa8b8d__module_init(), "aott_flydsl__silu_gate_launch__a7aa8b8d__module_init"); });
-  flydsl_check_status(aott_flydsl__silu_gate_launch__a7aa8b8d__module_load(-1), "aott_flydsl__silu_gate_launch__a7aa8b8d__module_load");
+  std::call_once(initialized, [] { flydsl_check_status(aott_flydsl__silu_gate_launch__f9f92961__module_init(), "aott_flydsl__silu_gate_launch__f9f92961__module_init"); });
+  flydsl_check_status(aott_flydsl__silu_gate_launch__f9f92961__module_load(-1), "aott_flydsl__silu_gate_launch__f9f92961__module_load");
   const int32_t device_index = torch::stable::accelerator::getCurrentDeviceIndex();
   if (!(reinterpret_cast<uintptr_t>(A.data_ptr()) % 16 == 0)) flydsl_fail("A must be 16-byte aligned");
   void* slot0 = A.data_ptr();
@@ -119,13 +150,13 @@ void _flydsl__silu_gate_launch__a7aa8b8d_run(torch::stable::Tensor A, torch::sta
   int32_t slot8 = static_cast<int32_t>(flydsl_i32(n, "n"));
   void* slot9 = flydsl_current_stream(device_index);
   void* args[] = {&slot0, static_cast<void*>(slot1), &slot2, static_cast<void*>(slot3), &slot4, static_cast<void*>(slot5), &slot6, static_cast<void*>(slot7), &slot8, &slot9};
-  flydsl_check_status(aott_flydsl__silu_gate_launch__a7aa8b8d(args), "aott_flydsl__silu_gate_launch__a7aa8b8d");
+  flydsl_check_status(aott_flydsl__silu_gate_launch__f9f92961(args), "aott_flydsl__silu_gate_launch__f9f92961");
 }
 
-void _flydsl__silu_gate_launch__eeaad3b5_run(torch::stable::Tensor A, torch::stable::Tensor B, torch::stable::Tensor C, torch::stable::Tensor Out, int64_t n, bool SUBTRACT) {
+void _flydsl__silu_gate_launch__b3077446_run(torch::stable::Tensor A, torch::stable::Tensor B, torch::stable::Tensor C, torch::stable::Tensor Out, int64_t n, bool SUBTRACT) {
   static std::once_flag initialized;
-  std::call_once(initialized, [] { flydsl_check_status(aott_flydsl__silu_gate_launch__eeaad3b5__module_init(), "aott_flydsl__silu_gate_launch__eeaad3b5__module_init"); });
-  flydsl_check_status(aott_flydsl__silu_gate_launch__eeaad3b5__module_load(-1), "aott_flydsl__silu_gate_launch__eeaad3b5__module_load");
+  std::call_once(initialized, [] { flydsl_check_status(aott_flydsl__silu_gate_launch__b3077446__module_init(), "aott_flydsl__silu_gate_launch__b3077446__module_init"); });
+  flydsl_check_status(aott_flydsl__silu_gate_launch__b3077446__module_load(-1), "aott_flydsl__silu_gate_launch__b3077446__module_load");
   const int32_t device_index = torch::stable::accelerator::getCurrentDeviceIndex();
   if (!(reinterpret_cast<uintptr_t>(A.data_ptr()) % 16 == 0)) flydsl_fail("A must be 16-byte aligned");
   void* slot0 = A.data_ptr();
@@ -146,7 +177,61 @@ void _flydsl__silu_gate_launch__eeaad3b5_run(torch::stable::Tensor A, torch::sta
   int32_t slot8 = static_cast<int32_t>(flydsl_i32(n, "n"));
   void* slot9 = flydsl_current_stream(device_index);
   void* args[] = {&slot0, static_cast<void*>(slot1), &slot2, static_cast<void*>(slot3), &slot4, static_cast<void*>(slot5), &slot6, static_cast<void*>(slot7), &slot8, &slot9};
-  flydsl_check_status(aott_flydsl__silu_gate_launch__eeaad3b5(args), "aott_flydsl__silu_gate_launch__eeaad3b5");
+  flydsl_check_status(aott_flydsl__silu_gate_launch__b3077446(args), "aott_flydsl__silu_gate_launch__b3077446");
+}
+
+void _flydsl__silu_gate_launch__dc8e9897_run(torch::stable::Tensor A, torch::stable::Tensor B, torch::stable::Tensor C, torch::stable::Tensor Out, int64_t n, bool SUBTRACT) {
+  static std::once_flag initialized;
+  std::call_once(initialized, [] { flydsl_check_status(aott_flydsl__silu_gate_launch__dc8e9897__module_init(), "aott_flydsl__silu_gate_launch__dc8e9897__module_init"); });
+  flydsl_check_status(aott_flydsl__silu_gate_launch__dc8e9897__module_load(-1), "aott_flydsl__silu_gate_launch__dc8e9897__module_load");
+  const int32_t device_index = torch::stable::accelerator::getCurrentDeviceIndex();
+  if (!(reinterpret_cast<uintptr_t>(A.data_ptr()) % 16 == 0)) flydsl_fail("A must be 16-byte aligned");
+  void* slot0 = A.data_ptr();
+  alignas(8) uint8_t slot1[4] = {};
+  flydsl_put<int32_t>(slot1, sizeof(slot1), 0, flydsl_i32(A.size(0), "A.size(0)"));
+  if (!(reinterpret_cast<uintptr_t>(B.data_ptr()) % 16 == 0)) flydsl_fail("B must be 16-byte aligned");
+  void* slot2 = B.data_ptr();
+  alignas(8) uint8_t slot3[4] = {};
+  flydsl_put<int32_t>(slot3, sizeof(slot3), 0, flydsl_i32(B.size(0), "B.size(0)"));
+  if (!(reinterpret_cast<uintptr_t>(C.data_ptr()) % 16 == 0)) flydsl_fail("C must be 16-byte aligned");
+  void* slot4 = C.data_ptr();
+  alignas(8) uint8_t slot5[4] = {};
+  flydsl_put<int32_t>(slot5, sizeof(slot5), 0, flydsl_i32(C.size(0), "C.size(0)"));
+  if (!(reinterpret_cast<uintptr_t>(Out.data_ptr()) % 16 == 0)) flydsl_fail("Out must be 16-byte aligned");
+  void* slot6 = Out.data_ptr();
+  alignas(8) uint8_t slot7[4] = {};
+  flydsl_put<int32_t>(slot7, sizeof(slot7), 0, flydsl_i32(Out.size(0), "Out.size(0)"));
+  int32_t slot8 = static_cast<int32_t>(flydsl_i32(n, "n"));
+  void* slot9 = flydsl_current_stream(device_index);
+  void* args[] = {&slot0, static_cast<void*>(slot1), &slot2, static_cast<void*>(slot3), &slot4, static_cast<void*>(slot5), &slot6, static_cast<void*>(slot7), &slot8, &slot9};
+  flydsl_check_status(aott_flydsl__silu_gate_launch__dc8e9897(args), "aott_flydsl__silu_gate_launch__dc8e9897");
+}
+
+void _flydsl__silu_gate_launch__9ded6582_run(torch::stable::Tensor A, torch::stable::Tensor B, torch::stable::Tensor C, torch::stable::Tensor Out, int64_t n, bool SUBTRACT) {
+  static std::once_flag initialized;
+  std::call_once(initialized, [] { flydsl_check_status(aott_flydsl__silu_gate_launch__9ded6582__module_init(), "aott_flydsl__silu_gate_launch__9ded6582__module_init"); });
+  flydsl_check_status(aott_flydsl__silu_gate_launch__9ded6582__module_load(-1), "aott_flydsl__silu_gate_launch__9ded6582__module_load");
+  const int32_t device_index = torch::stable::accelerator::getCurrentDeviceIndex();
+  if (!(reinterpret_cast<uintptr_t>(A.data_ptr()) % 16 == 0)) flydsl_fail("A must be 16-byte aligned");
+  void* slot0 = A.data_ptr();
+  alignas(8) uint8_t slot1[4] = {};
+  flydsl_put<int32_t>(slot1, sizeof(slot1), 0, flydsl_i32(A.size(0), "A.size(0)"));
+  if (!(reinterpret_cast<uintptr_t>(B.data_ptr()) % 16 == 0)) flydsl_fail("B must be 16-byte aligned");
+  void* slot2 = B.data_ptr();
+  alignas(8) uint8_t slot3[4] = {};
+  flydsl_put<int32_t>(slot3, sizeof(slot3), 0, flydsl_i32(B.size(0), "B.size(0)"));
+  if (!(reinterpret_cast<uintptr_t>(C.data_ptr()) % 16 == 0)) flydsl_fail("C must be 16-byte aligned");
+  void* slot4 = C.data_ptr();
+  alignas(8) uint8_t slot5[4] = {};
+  flydsl_put<int32_t>(slot5, sizeof(slot5), 0, flydsl_i32(C.size(0), "C.size(0)"));
+  if (!(reinterpret_cast<uintptr_t>(Out.data_ptr()) % 16 == 0)) flydsl_fail("Out must be 16-byte aligned");
+  void* slot6 = Out.data_ptr();
+  alignas(8) uint8_t slot7[4] = {};
+  flydsl_put<int32_t>(slot7, sizeof(slot7), 0, flydsl_i32(Out.size(0), "Out.size(0)"));
+  int32_t slot8 = static_cast<int32_t>(flydsl_i32(n, "n"));
+  void* slot9 = flydsl_current_stream(device_index);
+  void* args[] = {&slot0, static_cast<void*>(slot1), &slot2, static_cast<void*>(slot3), &slot4, static_cast<void*>(slot5), &slot6, static_cast<void*>(slot7), &slot8, &slot9};
+  flydsl_check_status(aott_flydsl__silu_gate_launch__9ded6582(args), "aott_flydsl__silu_gate_launch__9ded6582");
 }
 
 void flydsl_op(std::optional<torch::stable::Tensor> A_opt, std::optional<torch::stable::Tensor> B_opt, std::optional<torch::stable::Tensor> C_opt, std::optional<torch::stable::Tensor> Out_opt, int64_t n, bool SUBTRACT) {
@@ -155,12 +240,28 @@ void flydsl_op(std::optional<torch::stable::Tensor> A_opt, std::optional<torch::
   const torch::stable::Tensor C = flydsl_required(C_opt, "C");
   const torch::stable::Tensor Out = flydsl_required(Out_opt, "Out");
   if (A.scalar_type() == torch::headeronly::ScalarType::Float && A.dim() == 1 && A.stride(0) == 1 && B.scalar_type() == torch::headeronly::ScalarType::Float && B.dim() == 1 && B.stride(0) == 1 && C.scalar_type() == torch::headeronly::ScalarType::Float && C.dim() == 1 && C.stride(0) == 1 && Out.scalar_type() == torch::headeronly::ScalarType::Float && Out.dim() == 1 && Out.stride(0) == 1 && SUBTRACT == false) {
-    _flydsl__silu_gate_launch__a7aa8b8d_run(A, B, C, Out, n, SUBTRACT);
-    return;
+    static constexpr int64_t aott_entries[2][1] = {{13}, {20}};
+    const int64_t aott_keys[] = {n};
+    switch (aott_nearest_entry(aott_entries, aott_keys)) {
+      case 0:
+        _flydsl__silu_gate_launch__f9f92961_run(A, B, C, Out, n, SUBTRACT);
+        return;
+      default:
+        _flydsl__silu_gate_launch__b3077446_run(A, B, C, Out, n, SUBTRACT);
+        return;
+    }
   }
   if (A.scalar_type() == torch::headeronly::ScalarType::Float && A.dim() == 1 && A.stride(0) == 1 && B.scalar_type() == torch::headeronly::ScalarType::Float && B.dim() == 1 && B.stride(0) == 1 && C.scalar_type() == torch::headeronly::ScalarType::Float && C.dim() == 1 && C.stride(0) == 1 && Out.scalar_type() == torch::headeronly::ScalarType::Float && Out.dim() == 1 && Out.stride(0) == 1 && SUBTRACT == true) {
-    _flydsl__silu_gate_launch__eeaad3b5_run(A, B, C, Out, n, SUBTRACT);
-    return;
+    static constexpr int64_t aott_entries[2][1] = {{13}, {20}};
+    const int64_t aott_keys[] = {n};
+    switch (aott_nearest_entry(aott_entries, aott_keys)) {
+      case 0:
+        _flydsl__silu_gate_launch__dc8e9897_run(A, B, C, Out, n, SUBTRACT);
+        return;
+      default:
+        _flydsl__silu_gate_launch__9ded6582_run(A, B, C, Out, n, SUBTRACT);
+        return;
+    }
   }
   flydsl_fail("no compiled specialization matches the arguments; compiled: A: torch.float32 rank 1 unit-stride dim 0, B: torch.float32 rank 1 unit-stride dim 0, C: torch.float32 rank 1 unit-stride dim 0, Out: torch.float32 rank 1 unit-stride dim 0, SUBTRACT=False; A: torch.float32 rank 1 unit-stride dim 0, B: torch.float32 rank 1 unit-stride dim 0, C: torch.float32 rank 1 unit-stride dim 0, Out: torch.float32 rank 1 unit-stride dim 0, SUBTRACT=True");
 }

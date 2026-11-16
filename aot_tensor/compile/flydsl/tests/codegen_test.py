@@ -67,7 +67,7 @@ class GenerateTorchOpTest(unittest.TestCase):
         variants = variants or (_FAST,)
         routes = [_route(fly) for fly in variants]
         return generate_torch_op_content(
-            _OP, _SPECS, list(variants), frozenset({"x"}), routes
+            _OP, _SPECS, list(variants), frozenset({"x"}), routes, ()
         )
 
     @parameterized.expand(
@@ -79,7 +79,9 @@ class GenerateTorchOpTest(unittest.TestCase):
     def test_namespace_and_schema(
         self, _name: str, mutated: frozenset[str], tensor: str
     ) -> None:
-        out = generate_torch_op_content(_OP, _SPECS, [_FAST], mutated, [_route(_FAST)])
+        out = generate_torch_op_content(
+            _OP, _SPECS, [_FAST], mutated, [_route(_FAST)], ()
+        )
         self.assertIn(f"#define FLYDSL_OP_NAMESPACE {DEFAULT_OP_NAMESPACE_PREFIX}", out)
         self.assertIn(
             f'#define FLYDSL_OP_SCHEMA "{_OP}({tensor}, SymInt n, bool fast) -> ()"',

@@ -29,7 +29,11 @@ from aot_tensor.compile.adapter_base import hash_spec
 from aot_tensor.compile.flydsl.abi import ExportedLauncher
 from aot_tensor.compile.flydsl.aot import export_launcher
 from aot_tensor.compile.flydsl.codegen import FlyVariant, generate_torch_op_content
-from aot_tensor.compile.spec_selector import distinct_variants, variant_routes
+from aot_tensor.compile.spec_selector import (
+    distinct_variants,
+    key_exprs,
+    variant_routes,
+)
 from aot_tensor.constants import FLYDSL_SYMBOL_PREFIX
 from aot_tensor.types import FlyAOT
 
@@ -43,11 +47,9 @@ def compile_flydsl_to_cpp(
 ) -> list[ExportedLauncher]:
     """Export one launcher object per distinct specialization and generate the
     torch op dispatching between them; returns the objects to link."""
-    if op.autotune is not None:
-        raise NotImplementedError(
-            f"FlyDSL AOT {op.name}: autotune is eager-only so far."
-        )
     os.makedirs(install_dir, exist_ok=True)
+    if op.autotune is not None:
+        specs = op.autotune.expand(specs, op.arg_specs, op.name)
     keyed = [(spec, hash_spec(spec.hash_key), spec.hash_key) for spec in specs]
     to_compile = distinct_variants(op.name, keyed)
     variants: list[FlyVariant] = []
@@ -69,9 +71,17 @@ def compile_flydsl_to_cpp(
         routes = variant_routes(
             op.name, [(s.hash_key, v) for s, v in to_compile], op.autotune
         )
+        # Autotuned constexprs are baked into the variants, not op params.
+        autotuned = frozenset() if op.autotune is None else op.autotune.constexpr_names
+        op_specs = [spec for spec in op.arg_specs if spec.name not in autotuned]
         fp.write(
             generate_torch_op_content(
-                op.name, op.arg_specs, variants, op.mutated, routes
+                op.name,
+                op_specs,
+                variants,
+                op.mutated,
+                routes,
+                key_exprs(op.autotune),
             )
         )
     return [fly.exported for fly in variants]

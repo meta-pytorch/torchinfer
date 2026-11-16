@@ -287,7 +287,9 @@ def generate_torch_op_content(
     variants: list[FlyVariant],
     mutated: frozenset[str],
     routes: list[Route],
+    keys: tuple[str, ...],
 ) -> str:
+    """``arg_specs``: the op params. ``keys``: the C++ autotune key values."""
     _validate_specs(op_name, arg_specs)
     specs = _Specs(
         tensors={s.name: s for s in arg_specs if isinstance(s, FlyTensorArg)},
@@ -304,7 +306,7 @@ def generate_torch_op_content(
 
     selector = render_selector(
         routes,
-        (),
+        keys,
         {
             fly.variant.symbol: f"{fly.variant.symbol}_run({call_args})"
             for fly in variants
