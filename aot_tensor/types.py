@@ -306,14 +306,6 @@ class CuTeAOT(AOTTMarker, metaclass=AOTTMarkerMeta):
             tuner.check(arg_specs, self.name)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        if self.tuner is not None:
-            kwargs = self.tuner.resolve(self.arg_specs, self.name, *args, **kwargs)
-            args = ()
-        # Read via the class (see ``TritonAOT.run``) to avoid double-binding.
-        collector = type(self).spec_collector
-        if collector is not None:
-            collector(self, *args, **kwargs)
-
         # Lazy imports: `eager` breaks a types<->cutedsl.eager cycle; cutlass is a
         # stub-less GPU-only dep, injected here so eager.py needs no GPU import.
         import cutlass.cute as cute  # @manual  # pyre-ignore[21]: no stubs
@@ -321,9 +313,7 @@ class CuTeAOT(AOTTMarker, metaclass=AOTTMarkerMeta):
             eager as cutedsl_eager,
         )
 
-        return cutedsl_eager.run_cutedsl_jit(
-            cute.compile, self.jit_fn, self.arg_specs, self.name, *args, **kwargs
-        )
+        return cutedsl_eager.run_cutedsl_jit(cute.compile, self, *args, **kwargs)
 
 
 class FlyAOT(AOTTMarker, metaclass=AOTTMarkerMeta):
@@ -369,13 +359,6 @@ class FlyAOT(AOTTMarker, metaclass=AOTTMarkerMeta):
             tuner.check(arg_specs, self.name)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        if self.tuner is not None:
-            kwargs = self.tuner.resolve(self.arg_specs, self.name, *args, **kwargs)
-            args = ()
-        collector = type(self).spec_collector
-        if collector is not None:
-            collector(self, *args, **kwargs)
-
         # Lazy: flydsl is AMD-only and must stay off the Triton import path.
         from aot_tensor.compile.flydsl import (  # @manual  # pyrefly: ignore[missing-import]
             eager as flydsl_eager,

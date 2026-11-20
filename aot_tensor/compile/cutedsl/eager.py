@@ -10,15 +10,13 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from aot_tensor.arg_specs.common import (
-    module_basename_for_callable,
-    resolve_runtime_args,
-    spec_hash_key,
-)
+from aot_tensor.arg_specs.common import module_basename_for_callable, spec_hash_key
 from aot_tensor.arg_specs.cute import CuTeArgSpec
 from aot_tensor.compile.adapter_base import hash_spec
 from aot_tensor.compile.cutedsl.adapter import get_cutedsl_eager_cache
 from aot_tensor.compile.cutedsl.codegen import build_cute_call_args, make_codegens
+from aot_tensor.compile.eager_call import bind_call
+from aot_tensor.types import CuTeAOT
 
 
 def _compile_cache_key(
@@ -36,27 +34,23 @@ def _compile_cache_key(
 
 
 def run_cutedsl_jit(
-    compile_fn: Callable[..., Any],
-    jit_fn: Any,
-    arg_specs: list[CuTeArgSpec],
-    op_name: str,
-    *args: Any,
-    **kwargs: Any,
+    compile_fn: Callable[..., Any], op: CuTeAOT, *args: Any, **kwargs: Any
 ) -> Any:
-    """JIT-compile (via ``compile_fn``, e.g. ``cutlass.cute.compile``) and run the
-    kernel. ``compile_fn`` is injected by the caller so this module needs no
-    GPU-only cutlass import of its own."""
-    values = resolve_runtime_args(arg_specs, op_name, *args, **kwargs)
-    cute_args = build_cute_call_args(arg_specs, values)
-    key = _compile_cache_key(jit_fn, arg_specs, op_name, values)
+    """Bind ``op``'s call (``bind_call``: autotune, collect), then JIT-compile
+    (via ``compile_fn``, e.g. ``cutlass.cute.compile``) and run the kernel.
+    ``compile_fn`` is injected by the caller so this module needs no GPU-only
+    cutlass import of its own."""
+    values = bind_call(op, *args, **kwargs)
+    cute_args = build_cute_call_args(op.arg_specs, values)
+    key = _compile_cache_key(op.jit_fn, op.arg_specs, op.name, values)
     cache = get_cutedsl_eager_cache()
     compiled = cache.get(key)
     if compiled is None:
-        compiled = compile_fn(jit_fn, *cute_args)
+        compiled = compile_fn(op.jit_fn, *cute_args)
         cache[key] = compiled
     # The compiled function takes only the runtime args (constexprs are baked in);
     # the stream is the last of cute_args.
     runtime_args = [
-        arg for cg, arg in zip(make_codegens(arg_specs), cute_args) if cg.is_runtime
+        arg for cg, arg in zip(make_codegens(op.arg_specs), cute_args) if cg.is_runtime
     ]
     return compiled(*runtime_args, cute_args[-1])

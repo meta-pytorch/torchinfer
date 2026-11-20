@@ -25,6 +25,7 @@ from aot_tensor.compile.spec_selector import (
     match_condition,
     render_selector,
     Route,
+    route_group,
     Variant,
     variant_routes,
 )
@@ -134,8 +135,10 @@ _TUNER = Tuner(
 
 def _collected(m: int, neg: bool) -> RawSpec:
     """The spec a marker collects for this call: BM filled from ``tuned``."""
-    values = _TUNER.resolve(_TUNED_SPECS, "op", torch.empty(m), m, NEG=neg)
-    spec, _ = sample_spec_and_hash(_TUNED_SPECS, "op", "mod", **values)
+    values = _TUNER.bind(_TUNED_SPECS, "op", torch.empty(m), m, NEG=neg)
+    group = route_group(_TUNED_SPECS, "op", values, _TUNER.constexpr_names)
+    config = _TUNER.best_config(group, _TUNED_SPECS, values, "op")
+    spec, _ = sample_spec_and_hash(_TUNED_SPECS, "op", "mod", **(values | config))
     return spec
 
 
@@ -182,6 +185,12 @@ class VariantRoutesTest(unittest.TestCase):
         a, b, c = (v.symbol for _, v in compiled)
         routes = variant_routes("op", [(s.hash_key, v) for s, v in compiled], _TUNER)
         caller = f"x.scalar_type() == {_FLOAT} && x.dim() == 1 && x.stride(0) == 1"
+        # A call's route group is its route's condition.
+        values = _TUNER.bind(_TUNED_SPECS, "op", torch.empty(8), 8, NEG=False)
+        self.assertEqual(
+            route_group(_TUNED_SPECS, "op", values, _TUNER.constexpr_names),
+            f"{caller} && NEG == false",
+        )
         self.assertEqual(
             routes,
             [

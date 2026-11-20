@@ -444,21 +444,22 @@ class CuTeAOTTest(_MarkerResetTest):
         # ``import cutlass.cute as cute`` binds ``cute = cutlass_mock.cute``, so
         # the injected fn is ``cutlass_mock.cute.compile``.
         cutlass_mock = MagicMock()
+        cutlass_mock.cute.compile.return_value.return_value = "OUT"
         with (
             patch.dict(
                 sys.modules,
                 {"cutlass": cutlass_mock, "cutlass.cute": cutlass_mock.cute},
             ),
-            patch.object(cutedsl_eager, "run_cutedsl_jit", return_value="OUT") as run,
+            # build_cute_call_args reads the CUDA stream; the rest runs as is.
+            patch.object(
+                cutedsl_eager, "build_cute_call_args", return_value=(5, "stream")
+            ),
             patch("aot_tensor.compile.cutedsl.adapter.collect") as collect,
         ):
             self.assertEqual(op(5), "OUT")
 
-        run.assert_called_once_with(
-            cutlass_mock.cute.compile, vector_add_kernel, op.arg_specs, op.name, 5
-        )
         # collection fires once (with the op + args) only when AOT compile is enabled
-        expected_calls = [call(op, 5)] if enabled else []
+        expected_calls = [call(op, n=5)] if enabled else []
         self.assertEqual(collect.call_args_list, expected_calls)
 
 

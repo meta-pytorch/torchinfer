@@ -28,6 +28,12 @@ def _tuner(**overrides: Any) -> Tuner:
     return Tuner(**kwargs)
 
 
+def _autotuned(tuner: Tuner, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    """The call's values with the config the tuner picks, in route group "g"."""
+    values = tuner.bind(_AUTOTUNE_SPECS, "op", *args, **kwargs)
+    return values | tuner.best_config("g", _AUTOTUNE_SPECS, values, "op")
+
+
 class TunerTest(unittest.TestCase):
     @parameterized.expand(
         [
@@ -37,22 +43,20 @@ class TunerTest(unittest.TestCase):
             ("tie_takes_earlier", 100, 1),
         ]
     )
-    def test_resolve_fills_the_tuned_config(self, _name: str, m: int, bm: int) -> None:
+    def test_fills_the_tuned_config(self, _name: str, m: int, bm: int) -> None:
         x = torch.empty(m)
-        values = _tuner().resolve(_AUTOTUNE_SPECS, "op", x, m, NEG=False)
+        values = _autotuned(_tuner(), x, m, NEG=False)
         self.assertEqual(values, {"x": x, "n": m, "NEG": False, "BM": bm})
 
-    def test_resolve_keys_on_an_int_arg(self) -> None:
-        values = _tuner(key=["n"]).resolve(
-            _AUTOTUNE_SPECS, "op", torch.empty(1), 4096, NEG=False
-        )
+    def test_keys_on_an_int_arg(self) -> None:
+        values = _autotuned(_tuner(key=["n"]), torch.empty(1), 4096, NEG=False)
         self.assertEqual(values["BM"], 2)
 
-    def test_resolve_skips_configs_invalid_for_the_call(self) -> None:
+    def test_skips_configs_invalid_for_the_call(self) -> None:
         tuner = _tuner(valid=lambda cfg, c: not (c["NEG"] and cfg["BM"] == 2))
         x = torch.empty(4096)
-        self.assertEqual(tuner.resolve(_AUTOTUNE_SPECS, "op", x, 1, True)["BM"], 1)
-        self.assertEqual(tuner.resolve(_AUTOTUNE_SPECS, "op", x, 1, False)["BM"], 2)
+        self.assertEqual(_autotuned(tuner, x, 1, True)["BM"], 1)
+        self.assertEqual(_autotuned(tuner, x, 1, False)["BM"], 2)
 
     def test_tuple_and_bare_int_buckets_agree(self) -> None:
         self.assertEqual(
@@ -73,20 +77,20 @@ class TunerTest(unittest.TestCase):
                 "no_valid_config",
                 {"valid": lambda cfg, c: False},
                 {},
-                r"no tuned autotune config is valid for \{'NEG': False\}",
+                r"no autotune config is valid for \{'NEG': False\}",
             ),
         ]
     )
-    def test_resolve_rejects(
+    def test_rejects(
         self,
         _name: str,
         overrides: dict[str, object],
-        extra_kwargs: dict[str, object],
+        extra_kwargs: dict[str, Any],
         regex: str,
     ) -> None:
         with self.assertRaisesRegex(RuntimeError, regex):
-            _tuner(**overrides).resolve(
-                _AUTOTUNE_SPECS, "op", torch.empty(4), 4, NEG=False, **extra_kwargs
+            _autotuned(
+                _tuner(**overrides), torch.empty(4), 4, NEG=False, **extra_kwargs
             )
 
     @parameterized.expand(

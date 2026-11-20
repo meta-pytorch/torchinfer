@@ -14,6 +14,7 @@ from aot_tensor.arg_specs.common import (
 )
 from aot_tensor.arg_specs.cute import CuTeArgSpec, CuTeTensorArg
 from aot_tensor.compile.cutedsl.eager import _compile_cache_key, run_cutedsl_jit
+from aot_tensor.types import CuTeAOT
 
 
 def _toy_kernel() -> None:
@@ -45,7 +46,7 @@ class RunCutedslJitTest(unittest.TestCase):
             return_value=("x", True, "stream"),
         ):
             run_cutedsl_jit(
-                compile_fn, _toy_kernel, specs, "run_test_op", torch.empty(4, 8), True
+                compile_fn, CuTeAOT(_toy_kernel, specs), torch.empty(4, 8), True
             )
         self.assertEqual(
             calls,

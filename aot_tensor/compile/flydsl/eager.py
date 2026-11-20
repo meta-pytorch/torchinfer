@@ -10,8 +10,8 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-from aot_tensor.arg_specs.common import resolve_runtime_args
 from aot_tensor.arg_specs.fly import FlyTensorArg
+from aot_tensor.compile.eager_call import bind_call
 from aot_tensor.compile.flydsl.args import launcher_kwargs
 from aot_tensor.types import FlyAOT
 
@@ -24,7 +24,9 @@ def _same(before: torch.Tensor, after: torch.Tensor) -> bool:
 
 
 def run_flydsl_jit(op: FlyAOT, *args: Any, **kwargs: Any) -> Any:
-    values = resolve_runtime_args(op.arg_specs, op.name, *args, **kwargs)
+    """Bind ``op``'s call (``bind_call``: autotune, collect), then run the
+    launcher."""
+    values = bind_call(op, *args, **kwargs)
     tensors: dict[str, torch.Tensor] = {
         s.name: values[s.name]
         for s in op.arg_specs

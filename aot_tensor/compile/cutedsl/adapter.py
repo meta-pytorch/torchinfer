@@ -129,7 +129,7 @@ class CuTeAdapter(AOTTAdapter[tuple[CuTeAOT, set[str]]]):
 def collect(op: CuTeAOT, *args: Any, **kwargs: Any) -> None:
     """Collect a CuTeDSL kernel spec. Invoked via the spec collector that
     ``enable_spec_collection`` registers on ``CuTeAOT`` (fired from
-    ``CuTeAOT.__call__`` while compile is active). Registers ``CuTeAdapter`` as
+    ``run_cutedsl_jit`` while compile is active). Registers ``CuTeAdapter`` as
     active (so the orchestrator dispatches compile to it) and records the spec.
     """
     register_active(CuTeAdapter)

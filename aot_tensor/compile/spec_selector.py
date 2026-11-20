@@ -26,11 +26,12 @@ from __future__ import annotations
 # call's key.
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
 from aot_tensor.arg_specs.common import (
+    args_hash_key,
     ArgSpec,
     RawSpec,
     resolve_runtime_args,
@@ -136,6 +137,18 @@ def distinct_variants(
     return variants
 
 
+def route_group(
+    arg_specs: Sequence[ArgSpec],
+    op_name: str,
+    values: Mapping[str, Any],
+    autotuned: frozenset[str],
+) -> str:
+    """The route a call bound to ``values`` falls in: the match condition on the
+    args the caller passes. Tuner times its configs per route group."""
+    caller = [spec for spec in arg_specs if spec.name not in autotuned]
+    return match_condition(args_hash_key(caller, op_name, values))
+
+
 def expand_autotuned(
     specs: Sequence[RawSpec],
     arg_specs: Sequence[ArgSpec],
@@ -149,7 +162,14 @@ def expand_autotuned(
         values = resolve_runtime_args(
             arg_specs, op_name, *spec.runtime_args, **spec.runtime_kwargs
         )
-        routing = tuner.routing_for(tuner.other_constexprs(arg_specs, values), op_name)
+        group = route_group(arg_specs, op_name, values, tuner.constexpr_names)
+        routing = tuner.routing_for(group, tuner.other_constexprs(arg_specs, values))
+        if not routing.entries:
+            # The call that collected this spec picked its config from this table.
+            raise RuntimeError(
+                f"AOT-T {op_name}: collected a spec with no valid autotune config: "
+                f"{describe(spec.hash_key['args'])}."
+            )
         for config in routing.entries.values():
             # A config sets every autotuned constexpr at once; the call's other
             # args stay as collected.
@@ -181,7 +201,7 @@ def variant_routes(
     """``variants`` holds ``(hash_key, variant)``. One route per distinct match
     on the args the caller passes: without ``tuner`` that is one per variant;
     with it, the variants differing only in the autotuned constexprs share a
-    route whose table is the op's tuned entries valid for its other args."""
+    route whose table is the op's routing table for that group."""
     autotuned = frozenset() if tuner is None else tuner.constexpr_names
     # Match condition on the caller's args -> (those args, {config: symbol}).
     groups: dict[str, tuple[list[dict[str, Any]], dict[FrozenConfig, str]]] = {}
@@ -197,7 +217,7 @@ def variant_routes(
             table = RoutingTable({(): symbols[()]})
         else:
             constexprs = {a["name"]: a["constexpr"] for a in caller if "constexpr" in a}
-            routing = tuner.routing_for(constexprs, op_name)
+            routing = tuner.routing_for(condition, constexprs)
             table = RoutingTable(
                 {
                     point: symbols[frozen_config(config)]

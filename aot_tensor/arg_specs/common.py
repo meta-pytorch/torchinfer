@@ -7,7 +7,7 @@ from __future__ import annotations
 # Shared by the arg-spec DSLs: scalar/constexpr specs, the TensorArg base, arg
 # binding and the specialization hash key.
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -185,6 +185,17 @@ def spec_hash_key(
     values: dict[str, Any],
 ) -> dict[str, Any]:
     """Specialization key of a call."""
+    return {
+        "name": op_name,
+        "jit_module": jit_module,
+        "args": args_hash_key(arg_specs, op_name, values),
+    }
+
+
+def args_hash_key(
+    arg_specs: Sequence[ArgSpec], op_name: str, values: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """The per-arg part of a call's specialization key."""
     args: list[dict[str, Any]] = []
     for spec in arg_specs:
         value = values[spec.name]
@@ -204,7 +215,7 @@ def spec_hash_key(
             args.append({"name": spec.name, "tensor": key})
         else:
             raise RuntimeError(f"AOT-T {op_name}: unsupported arg spec {spec!r}.")
-    return {"name": op_name, "jit_module": jit_module, "args": args}
+    return args
 
 
 def sample_spec_and_hash(

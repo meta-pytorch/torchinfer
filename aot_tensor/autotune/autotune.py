@@ -88,24 +88,19 @@ class Tuner:
                 )
 
     def routing_for(
-        self, constexprs: Mapping[str, Any], op_name: str
+        self, group: str, constexprs: Mapping[str, Any]
     ) -> RoutingTable[dict[str, Any]]:
-        """The entries whose config is valid with these other constexprs."""
+        """The routing table of a call in route ``group``: the entries whose
+        config is valid with these other constexprs; may be empty."""
         valid = self.valid
         if valid is None:
             return self.routing
-        routing = self.routing.filter(lambda config: valid(config, constexprs))
-        if not routing.entries:
-            raise RuntimeError(
-                f"AOT-T {op_name}: no tuned autotune config is valid for "
-                f"{dict(constexprs)}."
-            )
-        return routing
+        return self.routing.filter(lambda config: valid(config, constexprs))
 
-    def resolve(
+    def bind(
         self, arg_specs: Sequence[ArgSpec], op_name: str, *args: Any, **kwargs: Any
     ) -> dict[str, Any]:
-        """Bind a call that leaves out the autotuned constexprs, and fill them in."""
+        """Bind a call that leaves out the autotuned constexprs."""
         passed = self.constexpr_names & set(kwargs)
         if passed:
             raise RuntimeError(
@@ -114,9 +109,24 @@ class Tuner:
         caller_specs = [
             spec for spec in arg_specs if spec.name not in self.constexpr_names
         ]
-        values = resolve_runtime_args(caller_specs, op_name, *args, **kwargs)
-        routing = self.routing_for(self.other_constexprs(arg_specs, values), op_name)
-        return values | routing.select(self.key_values(values, op_name))
+        return resolve_runtime_args(caller_specs, op_name, *args, **kwargs)
+
+    def best_config(
+        self,
+        group: str,
+        arg_specs: Sequence[ArgSpec],
+        values: Mapping[str, Any],
+        op_name: str,
+    ) -> dict[str, Any]:
+        """The config for a call bound to ``values`` in route ``group``: the
+        nearest entry of its routing table."""
+        constexprs = self.other_constexprs(arg_specs, values)
+        routing = self.routing_for(group, constexprs)
+        if not routing.entries:
+            raise RuntimeError(
+                f"AOT-T {op_name}: no autotune config is valid for {dict(constexprs)}."
+            )
+        return routing.select(self.key_values(values, op_name))
 
     def key_values(self, values: Mapping[str, Any], op_name: str) -> list[int]:
         """Each key's value in a call bound to ``values``."""
