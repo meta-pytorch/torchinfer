@@ -31,6 +31,7 @@ from aot_tensor.compile.flydsl.aot import export_launcher
 from aot_tensor.compile.flydsl.codegen import FlyVariant, generate_torch_op_content
 from aot_tensor.compile.spec_selector import (
     distinct_variants,
+    expand_autotuned,
     key_exprs,
     variant_routes,
 )
@@ -49,7 +50,7 @@ def compile_flydsl_to_cpp(
     torch op dispatching between them; returns the objects to link."""
     os.makedirs(install_dir, exist_ok=True)
     if op.autotune is not None:
-        specs = op.autotune.expand(specs, op.arg_specs, op.name)
+        specs = expand_autotuned(specs, op.arg_specs, op.name, op.autotune)
     keyed = [(spec, hash_spec(spec.hash_key), spec.hash_key) for spec in specs]
     to_compile = distinct_variants(op.name, keyed)
     variants: list[FlyVariant] = []

@@ -26,9 +26,16 @@ from __future__ import annotations
 # call's key.
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
+from aot_tensor.arg_specs.common import (
+    ArgSpec,
+    RawSpec,
+    resolve_runtime_args,
+    sample_spec_and_hash,
+)
 from aot_tensor.autotune.autotune import Autotune
 from aot_tensor.autotune.routing import RoutingTable
 from aot_tensor.compile.stable_types import TORCH_DTYPE_TO_STABLE
@@ -127,6 +134,34 @@ def distinct_variants(
             )
         )
     return variants
+
+
+def expand_autotuned(
+    specs: Sequence[RawSpec],
+    arg_specs: Sequence[ArgSpec],
+    op_name: str,
+    autotune: Autotune,
+) -> list[RawSpec]:
+    """Each collected spec once per config its routing table uses, so every
+    key value of the spec has a compiled variant."""
+    expanded: dict[str, RawSpec] = {}
+    for spec in specs:
+        values = resolve_runtime_args(
+            arg_specs, op_name, *spec.runtime_args, **spec.runtime_kwargs
+        )
+        routing = autotune.routing_for(
+            autotune.other_constexprs(arg_specs, values), op_name
+        )
+        for config in routing.entries.values():
+            # A config sets every autotuned constexpr at once; the call's other
+            # args stay as collected.
+            raw, hashed = sample_spec_and_hash(
+                arg_specs, op_name, spec.hash_key["jit_module"], **(values | config)
+            )
+            # Calls that differ only in size expand to the same specs (the hash
+            # ignores sizes), e.g. M=8 and M=4096 both give BM=1 and BM=2.
+            expanded.setdefault(hashed, raw)
+    return list(expanded.values())
 
 
 @dataclass(frozen=True)

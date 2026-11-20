@@ -21,6 +21,7 @@ from aot_tensor.compile.spec_selector import (
     cpp_literal,
     describe,
     distinct_variants,
+    expand_autotuned,
     match_condition,
     render_selector,
     Route,
@@ -138,6 +139,17 @@ def _collected(m: int, neg: bool) -> RawSpec:
     return spec
 
 
+class ExpandAutotunedTest(unittest.TestCase):
+    def test_adds_every_config_valid_for_each_spec(self) -> None:
+        collected = [_collected(4096, False), _collected(8, False), _collected(8, True)]
+        expanded = expand_autotuned(collected, _TUNED_SPECS, "op", _AUTOTUNE)
+        # The two NEG=False specs share their hash per config; NEG=True can use only BM=1.
+        self.assertEqual(
+            [(s.runtime_kwargs["NEG"], s.runtime_kwargs["BM"]) for s in expanded],
+            [(False, 1), (False, 2), (True, 1)],
+        )
+
+
 class VariantRoutesTest(unittest.TestCase):
     def test_one_route_per_variant_without_autotune(self) -> None:
         on, off = _key(torch.empty(8), True), _key(torch.empty(8), False)
@@ -154,8 +166,11 @@ class VariantRoutesTest(unittest.TestCase):
 
     def test_autotuned_variants_share_a_route_per_caller_match(self) -> None:
         # One collected M per NEG; expand compiles every config valid for each.
-        specs = _AUTOTUNE.expand(
-            [_collected(4096, False), _collected(8, True)], _TUNED_SPECS, "op"
+        specs = expand_autotuned(
+            [_collected(4096, False), _collected(8, True)],
+            _TUNED_SPECS,
+            "op",
+            _AUTOTUNE,
         )
         keyed = [(s, hash_spec(s.hash_key), s.hash_key) for s in specs]
         compiled = distinct_variants("op", keyed)
