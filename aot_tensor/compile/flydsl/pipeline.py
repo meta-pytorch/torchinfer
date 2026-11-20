@@ -49,8 +49,8 @@ def compile_flydsl_to_cpp(
     """Export one launcher object per distinct specialization and generate the
     torch op dispatching between them; returns the objects to link."""
     os.makedirs(install_dir, exist_ok=True)
-    if op.autotune is not None:
-        specs = expand_autotuned(specs, op.arg_specs, op.name, op.autotune)
+    if op.tuner is not None:
+        specs = expand_autotuned(specs, op.arg_specs, op.name, op.tuner)
     keyed = [(spec, hash_spec(spec.hash_key), spec.hash_key) for spec in specs]
     to_compile = distinct_variants(op.name, keyed)
     variants: list[FlyVariant] = []
@@ -70,10 +70,10 @@ def compile_flydsl_to_cpp(
 
     with open(os.path.join(install_dir, f"{op.name}_torch_op.cpp"), "w") as fp:
         routes = variant_routes(
-            op.name, [(s.hash_key, v) for s, v in to_compile], op.autotune
+            op.name, [(s.hash_key, v) for s, v in to_compile], op.tuner
         )
         # Autotuned constexprs are baked into the variants, not op params.
-        autotuned = frozenset() if op.autotune is None else op.autotune.constexpr_names
+        autotuned = frozenset() if op.tuner is None else op.tuner.constexpr_names
         op_specs = [spec for spec in op.arg_specs if spec.name not in autotuned]
         fp.write(
             generate_torch_op_content(
@@ -82,7 +82,7 @@ def compile_flydsl_to_cpp(
                 variants,
                 op.mutated,
                 routes,
-                key_exprs(op.autotune),
+                key_exprs(op.tuner),
             )
         )
     return [fly.exported for fly in variants]

@@ -36,7 +36,7 @@ from aot_tensor.arg_specs.common import (
     resolve_runtime_args,
     sample_spec_and_hash,
 )
-from aot_tensor.autotune.autotune import Autotune
+from aot_tensor.autotune.autotune import Tuner
 from aot_tensor.autotune.routing import RoutingTable
 from aot_tensor.compile.stable_types import TORCH_DTYPE_TO_STABLE
 
@@ -140,7 +140,7 @@ def expand_autotuned(
     specs: Sequence[RawSpec],
     arg_specs: Sequence[ArgSpec],
     op_name: str,
-    autotune: Autotune,
+    tuner: Tuner,
 ) -> list[RawSpec]:
     """Each collected spec once per config its routing table uses, so every
     key value of the spec has a compiled variant."""
@@ -149,9 +149,7 @@ def expand_autotuned(
         values = resolve_runtime_args(
             arg_specs, op_name, *spec.runtime_args, **spec.runtime_kwargs
         )
-        routing = autotune.routing_for(
-            autotune.other_constexprs(arg_specs, values), op_name
-        )
+        routing = tuner.routing_for(tuner.other_constexprs(arg_specs, values), op_name)
         for config in routing.entries.values():
             # A config sets every autotuned constexpr at once; the call's other
             # args stay as collected.
@@ -178,13 +176,13 @@ class Route:
 def variant_routes(
     op_name: str,
     variants: list[tuple[dict[str, Any], Variant]],
-    autotune: Autotune | None,
+    tuner: Tuner | None,
 ) -> list[Route]:
     """``variants`` holds ``(hash_key, variant)``. One route per distinct match
-    on the args the caller passes: without ``autotune`` that is one per variant;
+    on the args the caller passes: without ``tuner`` that is one per variant;
     with it, the variants differing only in the autotuned constexprs share a
     route whose table is the op's tuned entries valid for its other args."""
-    autotuned = frozenset() if autotune is None else autotune.constexpr_names
+    autotuned = frozenset() if tuner is None else tuner.constexpr_names
     # Match condition on the caller's args -> (those args, {config: symbol}).
     groups: dict[str, tuple[list[dict[str, Any]], dict[FrozenConfig, str]]] = {}
     for hash_key, variant in variants:
@@ -195,11 +193,11 @@ def variant_routes(
         symbols[frozen_config(config)] = variant.symbol
     routes: list[Route] = []
     for condition, (caller, symbols) in groups.items():
-        if autotune is None:
+        if tuner is None:
             table = RoutingTable({(): symbols[()]})
         else:
             constexprs = {a["name"]: a["constexpr"] for a in caller if "constexpr" in a}
-            routing = autotune.routing_for(constexprs, op_name)
+            routing = tuner.routing_for(constexprs, op_name)
             table = RoutingTable(
                 {
                     point: symbols[frozen_config(config)]
@@ -214,12 +212,12 @@ def frozen_config(config: dict[str, Any]) -> FrozenConfig:
     return tuple(sorted(config.items()))
 
 
-def key_exprs(autotune: Autotune | None) -> tuple[str, ...]:
+def key_exprs(tuner: Tuner | None) -> tuple[str, ...]:
     """C++ value of each autotune key in the op body, where tensors are bound."""
-    if autotune is None:
+    if tuner is None:
         return ()
     return tuple(
-        name if dim is None else f"{name}.size({dim})" for name, dim in autotune.key
+        name if dim is None else f"{name}.size({dim})" for name, dim in tuner.key
     )
 
 

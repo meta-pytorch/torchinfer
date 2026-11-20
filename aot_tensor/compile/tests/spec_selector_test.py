@@ -14,7 +14,7 @@ from aot_tensor.arg_specs.common import (
     ScalarArg,
 )
 from aot_tensor.arg_specs.fly import FlyTensorArg
-from aot_tensor.autotune.autotune import Autotune
+from aot_tensor.autotune.autotune import Tuner
 from aot_tensor.autotune.routing import RoutingTable
 from aot_tensor.compile.adapter_base import hash_spec
 from aot_tensor.compile.spec_selector import (
@@ -125,7 +125,7 @@ _TUNED_SPECS: list[ArgSpec] = [
     ConstexprArg("BM", int),
 ]
 # Buckets 16 (log2 4) and 1024 (log2 10); BM=2 is not valid with NEG.
-_AUTOTUNE = Autotune(
+_TUNER = Tuner(
     key=[("x", 0)],
     tuned={16: {"BM": 1}, 1024: {"BM": 2}},
     valid=lambda config, constexprs: not (constexprs["NEG"] and config["BM"] == 2),
@@ -134,7 +134,7 @@ _AUTOTUNE = Autotune(
 
 def _collected(m: int, neg: bool) -> RawSpec:
     """The spec a marker collects for this call: BM filled from ``tuned``."""
-    values = _AUTOTUNE.resolve(_TUNED_SPECS, "op", torch.empty(m), m, NEG=neg)
+    values = _TUNER.resolve(_TUNED_SPECS, "op", torch.empty(m), m, NEG=neg)
     spec, _ = sample_spec_and_hash(_TUNED_SPECS, "op", "mod", **values)
     return spec
 
@@ -142,7 +142,7 @@ def _collected(m: int, neg: bool) -> RawSpec:
 class ExpandAutotunedTest(unittest.TestCase):
     def test_adds_every_config_valid_for_each_spec(self) -> None:
         collected = [_collected(4096, False), _collected(8, False), _collected(8, True)]
-        expanded = expand_autotuned(collected, _TUNED_SPECS, "op", _AUTOTUNE)
+        expanded = expand_autotuned(collected, _TUNED_SPECS, "op", _TUNER)
         # The two NEG=False specs share their hash per config; NEG=True can use only BM=1.
         self.assertEqual(
             [(s.runtime_kwargs["NEG"], s.runtime_kwargs["BM"]) for s in expanded],
@@ -170,7 +170,7 @@ class VariantRoutesTest(unittest.TestCase):
             [_collected(4096, False), _collected(8, True)],
             _TUNED_SPECS,
             "op",
-            _AUTOTUNE,
+            _TUNER,
         )
         keyed = [(s, hash_spec(s.hash_key), s.hash_key) for s in specs]
         compiled = distinct_variants("op", keyed)
@@ -180,7 +180,7 @@ class VariantRoutesTest(unittest.TestCase):
             [f"{x}, NEG=False, BM=1", f"{x}, NEG=False, BM=2", f"{x}, NEG=True, BM=1"],
         )
         a, b, c = (v.symbol for _, v in compiled)
-        routes = variant_routes("op", [(s.hash_key, v) for s, v in compiled], _AUTOTUNE)
+        routes = variant_routes("op", [(s.hash_key, v) for s, v in compiled], _TUNER)
         caller = f"x.scalar_type() == {_FLOAT} && x.dim() == 1 && x.stride(0) == 1"
         self.assertEqual(
             routes,

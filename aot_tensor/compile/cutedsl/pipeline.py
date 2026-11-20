@@ -57,8 +57,8 @@ def compile_cutedsl_to_cpp(
     validate_cutedsl_op(codegens, op.name)
     os.makedirs(install_dir, exist_ok=True)
 
-    if op.autotune is not None:
-        specs = expand_autotuned(specs, op.arg_specs, op.name, op.autotune)
+    if op.tuner is not None:
+        specs = expand_autotuned(specs, op.arg_specs, op.name, op.tuner)
     keyed = [(spec, hash_spec(spec.hash_key), spec.hash_key) for spec in specs]
     to_compile = distinct_variants(op.name, keyed)
     variants: list[CuTeVariant] = []
@@ -82,7 +82,7 @@ def compile_cutedsl_to_cpp(
 
     sidecar_so_name = f"{op.name.lstrip('_')}_cutedsl_impl.so"
     # Autotuned constexprs are baked into the variants, not op params.
-    autotuned = frozenset() if op.autotune is None else op.autotune.constexpr_names
+    autotuned = frozenset() if op.tuner is None else op.tuner.constexpr_names
     op_codegens = [cg for cg in codegens if cg.name not in autotuned]
     with open(os.path.join(install_dir, f"{op.name}_torch_op.cpp"), "w") as fp:
         fp.write(
@@ -92,9 +92,9 @@ def compile_cutedsl_to_cpp(
                 variants,
                 sidecar_so_name,
                 variant_routes(
-                    op.name, [(s.hash_key, v) for s, v in to_compile], op.autotune
+                    op.name, [(s.hash_key, v) for s, v in to_compile], op.tuner
                 ),
-                key_exprs(op.autotune),
+                key_exprs(op.tuner),
             )
         )
     return [os.path.join(install_dir, f"{cute.variant.symbol}.o") for cute in variants]

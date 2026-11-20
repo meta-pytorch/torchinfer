@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-# The ``autotune=`` of ``cutedsl_aot`` and ``flydsl_aot``: the constexprs an op
+# The ``tuner=`` of ``cutedsl_aot`` and ``flydsl_aot``: the constexprs an op
 # picks itself, and the call values it picks them by.
 
 from collections.abc import Callable, Mapping, Sequence
@@ -24,10 +24,11 @@ from aot_tensor.autotune.routing import RoutingTable
 AutotuneKey = str | tuple[str, int]
 
 
-class Autotune:
+class Tuner:
     """Constexprs an op picks itself. The caller does not pass them: each call
     takes the ``tuned`` entry nearest to its ``key`` values (rule in
-    ``aot_tensor.autotune.routing``) and uses that entry's config.
+    ``aot_tensor.autotune.routing``) and uses that entry's config. (Not named
+    ``Autotuner``, which is Triton's.)
 
     ``tuned``: bucket per key (powers of 2; a bare int with one key) -> config,
     each config setting the same constexprs; earlier entries win ties.
@@ -45,7 +46,7 @@ class Autotune:
         valid: Callable[[Mapping[str, Any], Mapping[str, Any]], bool] | None = None,
     ) -> None:
         if not key or not tuned:
-            raise ValueError("Autotune: key and tuned must not be empty.")
+            raise ValueError("Tuner: key and tuned must not be empty.")
         # (arg name, tensor dim); the dim is None for an int arg.
         self.key: tuple[tuple[str, int | None], ...] = tuple(
             key_arg_and_dim(k) for k in key
@@ -150,7 +151,7 @@ def key_arg_and_dim(key: AutotuneKey) -> tuple[str, int | None]:
         return key, None
     name, dim = key
     if dim < 0:
-        raise ValueError(f"Autotune: key {key} needs a dim >= 0.")
+        raise ValueError(f"Tuner: key {key} needs a dim >= 0.")
     return name, dim
 
 
@@ -176,10 +177,10 @@ def bucket_table(
         buckets = (raw,) if isinstance(raw, int) else tuple(raw)
         if len(buckets) != len(key):
             raise ValueError(
-                f"Autotune: tuned entry {buckets} needs one bucket per key {list(key)}."
+                f"Tuner: tuned entry {buckets} needs one bucket per key {list(key)}."
             )
         if buckets in table:
-            raise ValueError(f"Autotune: tuned lists {buckets} twice.")
+            raise ValueError(f"Tuner: tuned lists {buckets} twice.")
         table[buckets] = dict(config)
     return table
 
@@ -190,7 +191,7 @@ def config_names(configs: Sequence[Mapping[str, Any]]) -> frozenset[str]:
     for config in configs:
         if set(config) != names:
             raise ValueError(
-                f"Autotune: config {dict(config)} sets {sorted(config)}, expected "
+                f"Tuner: config {dict(config)} sets {sorted(config)}, expected "
                 f"{sorted(names)}."
             )
     return names
