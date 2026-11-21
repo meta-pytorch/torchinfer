@@ -357,11 +357,6 @@ class FlyAOT(AOTTMarker, metaclass=AOTTMarkerMeta):
             )
         if tuner is not None:
             tuner.check(arg_specs, self.name)
-            if tuner.configs:
-                raise NotImplementedError(
-                    f"FlyAOT {self.name}: timing autotune configs is not tested "
-                    "on AMD yet; give tuned."
-                )
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         # Lazy: flydsl is AMD-only and must stay off the Triton import path.
