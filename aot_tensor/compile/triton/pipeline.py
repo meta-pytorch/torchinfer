@@ -14,7 +14,7 @@ import multiprocessing as mp
 import os
 import signal
 import threading
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from types import FrameType, ModuleType
 from typing import Any, Callable
@@ -51,6 +51,20 @@ from triton.backends.compiler import GPUTarget
 from triton.runtime.jit import KernelInterface
 
 logger: logging.Logger = logging.getLogger(__name__)
+
+# ``(meta_func, specs, field_defaults, backend) -> {field: [alias, ...]}``.
+#
+# Called once per kernel after the SMEM filter, with the kernel whose
+# ``_meta.py`` is generated, the specs that are compiled into the selector,
+# and the backend's autotune field defaults. For each returned field, a spec
+# left at that field's default also dispatches when the caller passes one of
+# the alias values (see ``codegen._autotune_guards``). Lets an integration
+# match an ``_meta`` that encodes "option unset" as a value other than the
+# compile default.
+SelectorGuardAliasProvider = Callable[
+    [Any, Sequence[KernelSpec], Mapping[str, Any], str],
+    Mapping[str, Sequence[Any]],
+]
 
 
 def compile_specs_parallel(
@@ -197,6 +211,7 @@ def compile_to_cpp(
     tuner_fallback: bool = False,
     op_namespace: str,
     compile_options: Mapping[str, Any] | None = None,
+    selector_guard_aliases: SelectorGuardAliasProvider | None = None,
 ) -> None:
     """Compile a Triton kernel into .cpp, .h, _torch_op.cpp, _meta.py files.
 
@@ -216,6 +231,8 @@ def compile_to_cpp(
         compile_options: Triton backend options for every spec's compile: the
             ``compile_options`` of the ``TritonAOT`` marker that launched the
             kernel during spec collection.
+        selector_guard_aliases: optional extra values the selector's autotune
+            guards accept (see ``SelectorGuardAliasProvider``).
     """
     tuned_func = func if is_autotuner(func) else None
     # pyre-ignore[6]: Attributes verified by is_autotuner
@@ -283,6 +300,17 @@ def compile_to_cpp(
         compile_options,
     )
     unit, filtered_specs = unit.drop_oversize_specs(generated_specs)
+    meta_func = tuned_func if tuned_func else func
+    guard_aliases = (
+        selector_guard_aliases(
+            meta_func,
+            unit.specs,
+            {f.name: f.default for f in autotune_fields},
+            gpu_target.backend,
+        )
+        if selector_guard_aliases is not None
+        else None
+    )
 
     # Generate kernel.cpp file
     cu_content = generate_kernel_cpp_content(
@@ -293,6 +321,7 @@ def compile_to_cpp(
         filtered_specs,
         autotune_fields,
         gpu_target.backend,
+        guard_aliases=guard_aliases,
     )
     with open(cu_out, "w") as fp:
         fp.write(cu_content)
@@ -313,7 +342,6 @@ def compile_to_cpp(
         )
         fp.write("\n")
 
-    meta_func = tuned_func if tuned_func else func
     with open(py_out, "w") as fp:
         fp.write(
             gen_tuner_meta_py(

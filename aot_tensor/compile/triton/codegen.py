@@ -15,6 +15,7 @@ import os
 import re
 import textwrap
 from collections import Counter
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, Field
 from typing import Any, Callable
 
@@ -703,16 +704,31 @@ def _constant_guards(
     return guards
 
 
+def _autotune_literal(v: Any) -> Any:
+    # C++ bool literals are lowercase (true/false), unlike Python repr.
+    return ("true" if v else "false") if isinstance(v, bool) else v
+
+
 def _autotune_guards(
     spec: KernelSpec,
     autotune_fields: tuple[Field[Any], ...],
+    guard_aliases: Mapping[str, Sequence[Any]] | None = None,
 ) -> list[Guard]:
+    """One guard per autotune field.
+
+    A spec left at a field's default also matches that field's
+    ``guard_aliases`` values: a caller that asks for one of them gets the
+    variant compiled without that option set.
+    """
     guards = []
     for f in autotune_fields:
         v = getattr(spec.autotune, f.name)
-        # C++ bool literals are lowercase (true/false), unlike Python repr.
-        v_str = ("true" if v else "false") if isinstance(v, bool) else v
-        guards.append(Guard(f"{f.name} == {v_str}"))
+        accepted = [v]
+        if guard_aliases and v == f.default:
+            accepted += guard_aliases.get(f.name, ())
+        guards.append(
+            Guard(" || ".join(f"{f.name} == {_autotune_literal(a)}" for a in accepted))
+        )
     return guards
 
 
@@ -774,6 +790,7 @@ def spec_guards(
     spec: KernelSpec,
     desc_by_idx: dict[int, ArgDescriptor],
     autotune_fields: tuple[Field[Any], ...],
+    guard_aliases: Mapping[str, Sequence[Any]] | None = None,
 ) -> list[Guard]:
     """All guards for one spec, in emission order.
 
@@ -783,7 +800,7 @@ def spec_guards(
         *_dtype_guards(spec, desc_by_idx),
         *_narrowing_guards(spec, desc_by_idx),
         *_constant_guards(spec, desc_by_idx),
-        *_autotune_guards(spec, autotune_fields),
+        *_autotune_guards(spec, autotune_fields, guard_aliases),
         *_divisible_by_16_guards(spec, desc_by_idx),
         *_divisible_by_8_guards(spec, desc_by_idx),
         *_pointer_range_32_guards(spec, desc_by_idx),
@@ -801,6 +818,7 @@ def gen_guarded_calls(
     unit: OpsUnit,
     descriptors: list[ArgDescriptor],
     autotune_fields: tuple[Field[Any], ...],
+    guard_aliases: Mapping[str, Sequence[Any]] | None = None,
 ) -> str:
     desc_by_idx: dict[int, ArgDescriptor] = {d.index: d for d in descriptors}
     # Codegen-time backstop over the post-``drop_oversize_specs`` set;
@@ -813,7 +831,8 @@ def gen_guarded_calls(
         args = gen_launcher_call_args(
             descriptors, spec.signature, indent=_CALL_ARG_INDENT
         )
-        lines = [g.render() for g in spec_guards(spec, desc_by_idx, autotune_fields)]
+        guards = spec_guards(spec, desc_by_idx, autotune_fields, guard_aliases)
+        lines = [g.render() for g in guards]
         if spec.label is not None:
             # Provenance comment (e.g. the kernel-foundry Template rung this
             # spec was declared as) — inspection aid, zero behavior.
@@ -899,9 +918,12 @@ def gen_selector(
     unit: OpsUnit,
     descriptors: list[ArgDescriptor],
     autotune_fields: tuple[Field[Any], ...],
+    guard_aliases: Mapping[str, Sequence[Any]] | None = None,
 ) -> str:
     params = gen_selector_params(descriptors, autotune_fields, indent=_CONT)
-    guarded_calls = gen_guarded_calls(func, unit, descriptors, autotune_fields)
+    guarded_calls = gen_guarded_calls(
+        func, unit, descriptors, autotune_fields, guard_aliases
+    )
     failure_msg = gen_failure_msg(descriptors, autotune_fields)
     return _SELECTOR_TMPL.format(
         func_name=func.__name__,
@@ -1057,6 +1079,18 @@ def is_non_empty_mapping_of_type(obj: object, value_type: type[Any]) -> bool:
     return all(isinstance(value, value_type) for value in obj.values())
 
 
+def meta_hook_takes_field_defaults(func: Any) -> bool:
+    """Whether ``func.gen_autotune_select_meta_src`` takes ``autotune_field_defaults``.
+
+    ``gen_tuner_meta_py`` calls a hook without it with ``constant_types`` only.
+    False when ``func`` has no such hook.
+    """
+    hook = getattr(func, "gen_autotune_select_meta_src", None)
+    if hook is None:
+        return False
+    return "autotune_field_defaults" in inspect.signature(hook).parameters
+
+
 def gen_tuner_meta_py(
     func: Any,
     tuner_fallback: bool,
@@ -1073,7 +1107,7 @@ def gen_tuner_meta_py(
     # will unpack.  The signature probe keeps old packages working.
     if hasattr(func, "gen_autotune_select_meta_src"):
         hook = func.gen_autotune_select_meta_src
-        if "autotune_field_defaults" in inspect.signature(hook).parameters:
+        if meta_hook_takes_field_defaults(func):
             return hook(
                 unit.constant_types,
                 backend=backend,
@@ -1272,15 +1306,17 @@ def generate_kernel_cpp_content(
     generated_specs: list[str],
     autotune_fields: tuple[Field[Any], ...],
     backend: str,
+    guard_aliases: Mapping[str, Sequence[Any]] | None = None,
 ) -> str:
     """Generate the content of the kernel .cpp file.
 
     *backend* selects hipification of the generated code and the launch.h
     include; per-backend autotune field selection is delegated to
-    *autotune_fields*.
+    *autotune_fields*. *guard_aliases* extends the selector's autotune guards
+    (see ``_autotune_guards``).
     """
     kernel_specs = "\n".join(generated_specs)
-    selector = gen_selector(func, unit, descriptors, autotune_fields)
+    selector = gen_selector(func, unit, descriptors, autotune_fields, guard_aliases)
 
     # On AMD, hipify the generated code; the template has a HIP version.
     if backend == "hip":

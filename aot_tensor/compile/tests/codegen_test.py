@@ -50,6 +50,7 @@ from aot_tensor.compile.triton.codegen import (
     generate_torch_op_content,
     Guard,
     is_non_empty_mapping_of_type,
+    meta_hook_takes_field_defaults,
     spec_guards,
     validate_unique_kernel_names,
 )
@@ -1780,6 +1781,108 @@ class SelectorDtypeReadsTest(unittest.TestCase):
         first_spec = selector.index("if (x.has_value())")
         self.assertLess(branch, first_read)
         self.assertLess(first_read, first_spec)
+
+
+class SelectorGuardAliasesTest(unittest.TestCase):
+    """``guard_aliases`` widen the autotune guards of specs left at a default."""
+
+    _FIELDS: tuple[dataclasses.Field[Any], ...] = AutotuneAttrs.fields_for("cuda")
+    _WARPS_DEFAULT: int = AutotuneAttrs().num_warps
+
+    @staticmethod
+    @triton.jit
+    def _kernel(x, N, BLK: tl.constexpr) -> None:  # noqa: N802
+        pass
+
+    def _unit(self, *autotunes: AutotuneAttrs) -> OpsUnit:
+        base = KernelSpec(
+            signature={0: "*fp32", 1: "i32"},
+            constants={2: 64},
+            divisible_by_16={0},
+            divisible_by_8=set(),
+        )
+        return OpsUnit(
+            cc=90,
+            optional=set(),
+            pointer_args={0},
+            scalar_dtypes={1: "i32"},
+            constant_types={2: int},
+            specs=[base] + [dataclasses.replace(base, autotune=a) for a in autotunes],
+            autotune_fields=self._FIELDS,
+        )
+
+    def _rendered(
+        self, unit: OpsUnit, guard_aliases: dict[str, list[Any]] | None
+    ) -> list[list[str]]:
+        desc_by_idx = {d.index: d for d in build_arg_descriptors(self._kernel, unit)}
+        return [
+            [
+                g.render()
+                for g in spec_guards(s, desc_by_idx, self._FIELDS, guard_aliases)
+            ]
+            for s in unit.specs
+        ]
+
+    def test_aliases_apply_only_to_specs_at_the_default(self) -> None:
+        d = self._WARPS_DEFAULT
+        unit = self._unit(dataclasses.replace(AutotuneAttrs(), num_warps=d * 2))
+        rendered = self._rendered(unit, {"num_warps": [d + 1, d + 3]})
+        self.assertIn(
+            f"if (num_warps == {d} || num_warps == {d + 1} || num_warps == {d + 3})",
+            rendered[0],
+        )
+        self.assertIn(f"if (num_warps == {d * 2})", rendered[1])
+
+    def test_bool_aliases_render_as_cpp_literals(self) -> None:
+        rendered = self._rendered(self._unit(), {"auto_tma": [True]})
+        self.assertIn("if (auto_tma == false || auto_tma == true)", rendered[0])
+
+    @parameterized.expand([("none", None), ("empty", {}), ("other_field", {"x": [1]})])
+    def test_without_matching_aliases_guards_are_unchanged(
+        self, _name: str, guard_aliases: dict[str, list[Any]] | None
+    ) -> None:
+        unit = self._unit()
+        self.assertEqual(
+            self._rendered(unit, guard_aliases), self._rendered(unit, None)
+        )
+        self.assertIn(
+            f"if (num_warps == {self._WARPS_DEFAULT})", self._rendered(unit, None)[0]
+        )
+
+    def test_guard_aliases_reach_the_selector(self) -> None:
+        d = self._WARPS_DEFAULT
+        unit = self._unit()
+        descriptors = build_arg_descriptors(self._kernel, unit)
+        selector = gen_selector(
+            self._kernel, unit, descriptors, self._FIELDS, {"num_warps": [d + 1]}
+        )
+        self.assertIn(f"num_warps == {d} || num_warps == {d + 1}", selector)
+
+
+def _hook_without_field_defaults(constant_types: Dict[int, type]) -> str:
+    return ""
+
+
+def _hook_with_field_defaults(
+    constant_types: Dict[int, type],
+    autotune_field_defaults: Dict[str, Any] | None = None,
+) -> str:
+    return ""
+
+
+class MetaHookTakesFieldDefaultsTest(unittest.TestCase):
+    @parameterized.expand(
+        [
+            ("takes_field_defaults", _hook_with_field_defaults, True),
+            ("predates_field_defaults", _hook_without_field_defaults, False),
+        ]
+    )
+    def test_probe(self, _name: str, hook: Any, expected: bool) -> None:
+        func = types.SimpleNamespace(gen_autotune_select_meta_src=hook)
+        self.assertEqual(meta_hook_takes_field_defaults(func), expected)
+
+    def test_no_hook(self) -> None:
+        self.assertFalse(meta_hook_takes_field_defaults(object()))
 
 
 class IsNonEmptyMappingOfTypeTest(unittest.TestCase):

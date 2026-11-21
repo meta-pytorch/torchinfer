@@ -28,7 +28,10 @@ from aot_tensor.compile.compile_state import add_spec, get_kernel_specs, registe
 from aot_tensor.compile.stable_types import SCALAR_TYPES
 from aot_tensor.compile.triton.codegen import is_non_empty_mapping_of_type
 from aot_tensor.compile.triton.compat import get_kernel_name
-from aot_tensor.compile.triton.pipeline import compile_to_cpp
+from aot_tensor.compile.triton.pipeline import (
+    compile_to_cpp,
+    SelectorGuardAliasProvider,
+)
 from aot_tensor.compile.triton.spec_processing import compute_autotune_param_names
 from aot_tensor.compile.triton.utils import (
     AutotuneCache,
@@ -487,12 +490,16 @@ class TritonCompileConfig(DslCompileConfig):
         own namespace so their kernel libraries can coexist: both register at
         dlopen, and ``Dispatcher::registerDef`` hard-fails a second ``def`` of
         one operator.
+    selector_guard_aliases: optional extra values each kernel's selector
+        accepts for autotune fields a spec leaves at their default (see
+        ``SelectorGuardAliasProvider``). ``None`` (OSS default) adds none.
     """
 
     auto_tune_cache_overrides: dict[str, AutotuneCache] | None = None
     gpu_target: GPUTarget | None = None
     drift_check: Callable[[GPUTarget], None] | None = None
     op_namespace: str = DEFAULT_OP_NAMESPACE_PREFIX
+    selector_guard_aliases: SelectorGuardAliasProvider | None = None
 
 
 def resolve_triton_gpu_target(config: TritonCompileConfig) -> GPUTarget:
@@ -591,6 +598,7 @@ class TritonAdapter(AOTTAdapter[TritonAOT]):
                 import_module=ctx.import_module,
                 default_values=default_values,
                 compile_options=kspec.compile_options,
+                selector_guard_aliases=cfg.selector_guard_aliases,
             )
 
             shared_library = build_triton_aot_extension(

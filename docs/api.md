@@ -14,7 +14,7 @@ supported.
 
 | API | Description |
 | --- | --- |
-| `TritonCompileConfig` | Configures the target GPU, generated operator namespace, optional autotune-cache overrides, and an optional target drift check. With no `gpu_target`, the attached GPU is detected automatically. |
+| `TritonCompileConfig` | Configures the target GPU, generated operator namespace, optional autotune-cache overrides, an optional target drift check, and an optional provider of extra values the generated selectors accept for autotune options left at their defaults. With no `gpu_target`, the attached GPU is detected automatically. |
 | `ExtensionBuildConfig` | Overrides the CUDA Toolkit root and adds Torch include and GPU library directories for building the generated extensions. Its `compiler_path` selects only the linker; set `CXX` to choose the C++ compiler. |
 | `LoweringOptions` | Combines the Triton and extension build configurations and controls post-lowering validation. |
 | `lower_model(module, example_inputs, *, work_dir, options)` | Collects kernel specializations from representative inputs, compiles native artifacts, rewrites the graph in place, optionally validates it, and returns a `LoweringResult`. |

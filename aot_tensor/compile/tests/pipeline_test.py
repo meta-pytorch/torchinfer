@@ -7,8 +7,8 @@ from types import ModuleType, SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, patch
 
-from aot_tensor.compile.triton.pipeline import spec_gen
-from aot_tensor.compile.triton.spec_processing import AutotuneAttrs, KernelSpec
+from aot_tensor.compile.triton.pipeline import compile_to_cpp, spec_gen
+from aot_tensor.compile.triton.spec_processing import AutotuneAttrs, KernelSpec, OpsUnit
 from aot_tensor.types import TritonAOT
 from parameterized import parameterized
 from triton.backends.compiler import GPUTarget
@@ -207,3 +207,71 @@ class SpecGenTest(unittest.TestCase):
         )
         self.assertIn("_w8_", code)
         self.assertIn(f"grid.z, {gpu_target.warp_size} * 8, 1, 1,", code)
+
+
+class CompileToCppSelectorGuardAliasesTest(unittest.TestCase):
+    """``selector_guard_aliases`` sees the post-filter specs and reaches the selector."""
+
+    def _run(self, provider: MagicMock | None) -> tuple[OpsUnit, MagicMock]:
+        spec = KernelSpec(
+            signature={0: "*fp32"},
+            constants={},
+            divisible_by_16=set(),
+            divisible_by_8=set(),
+        )
+        kept = dataclasses.replace(spec, autotune=AutotuneAttrs(num_warps=8))
+        fields = AutotuneAttrs.fields_for("hip")
+        unit = OpsUnit(
+            cc="gfx950",
+            optional=set(),
+            pointer_args={0},
+            scalar_dtypes={},
+            constant_types={},
+            specs=[spec, kept],
+            autotune_fields=fields,
+        )
+        retained = dataclasses.replace(unit, specs=[kept])
+        jit_fn = MagicMock(arg_names=["x"], __module__="m", __name__="_k")
+        mod = "aot_tensor.compile.triton.pipeline"
+        with (
+            patch(f"{mod}.OpsUnit.from_raw_specs", return_value=unit),
+            patch(f"{mod}.unwrap_to_jit", return_value=jit_fn),
+            patch(f"{mod}.build_arg_descriptors", return_value=[]),
+            patch(f"{mod}.generate_header_content", return_value=""),
+            patch(f"{mod}.validate_unique_kernel_names"),
+            patch(f"{mod}.compile_specs_parallel", return_value=[]),
+            patch.object(OpsUnit, "drop_oversize_specs", return_value=(retained, [])),
+            patch(f"{mod}.generate_kernel_cpp_content", return_value="") as cpp,
+            patch(f"{mod}.generate_torch_op_content", return_value=""),
+            patch(f"{mod}.gen_torch_op_schema", return_value={}),
+            patch(f"{mod}.gen_tuner_meta_py", return_value=""),
+            patch("builtins.open"),
+        ):
+            compile_to_cpp(
+                jit_fn,
+                [],
+                "/nonexistent",
+                "_k",
+                gpu_target=GPUTarget("hip", "gfx950", 64),
+                import_module=MagicMock(),
+                op_namespace="ns",
+                selector_guard_aliases=provider,
+            )
+        return retained, cpp
+
+    def test_provider_sees_retained_specs_and_field_defaults(self) -> None:
+        provider = MagicMock(return_value={"waves_per_eu": [7]})
+        retained, cpp = self._run(provider)
+        provider.assert_called_once()
+        meta_func, specs, field_defaults, backend = provider.call_args.args
+        self.assertEqual(list(specs), retained.specs)
+        self.assertEqual(
+            field_defaults,
+            {f.name: f.default for f in AutotuneAttrs.fields_for("hip")},
+        )
+        self.assertEqual(backend, "hip")
+        self.assertEqual(cpp.call_args.kwargs["guard_aliases"], {"waves_per_eu": [7]})
+
+    def test_no_provider_passes_no_aliases(self) -> None:
+        _, cpp = self._run(None)
+        self.assertIsNone(cpp.call_args.kwargs["guard_aliases"])
