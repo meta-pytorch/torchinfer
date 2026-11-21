@@ -7,6 +7,7 @@ from __future__ import annotations
 # The ``tuner=`` of ``cutedsl_aot`` and ``flydsl_aot``: the constexprs an op
 # picks itself, and the call values it picks them by.
 
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -17,23 +18,32 @@ from aot_tensor.arg_specs.common import (
     ScalarArg,
     TensorArg,
 )
-from aot_tensor.autotune.routing import RoutingTable
+from aot_tensor.autotune.routing import log2_bucket, RoutingTable
 
+logger: logging.Logger = logging.getLogger(__name__)
 
 # What picks an autotune config: a tensor dim ``("mA", 0)`` or an int arg's name.
 AutotuneKey = str | tuple[str, int]
 
+# Times configs on one call: (the call's bound values, configs) -> ms per config.
+TimeConfigs = Callable[[Mapping[str, Any], list[dict[str, Any]]], list[float]]
+
 
 class Tuner:
     """Constexprs an op picks itself. The caller does not pass them: each call
-    takes the ``tuned`` entry nearest to its ``key`` values (rule in
+    takes the routing entry nearest to its ``key`` values (rule in
     ``aot_tensor.autotune.routing``) and uses that entry's config. (Not named
     ``Autotuner``, which is Triton's.)
 
-    ``tuned``: bucket per key (powers of 2; a bare int with one key) -> config,
-    each config setting the same constexprs; earlier entries win ties.
+    ``tuned``: bucket per key (powers of 2; a bare int with one key) -> config;
+    earlier entries win ties.
+    ``configs``: candidates timed while AOT-T collects specs, once per route
+    group and bucket that ``tuned`` does not cover; the fastest becomes that
+    bucket's entry for the group. Until a bucket is timed, a call takes the
+    first valid one, so list the default first.
+    Every config sets the same constexprs.
     ``valid(config, constexprs)``: whether a config works with the call's other
-    constexprs; entries that fail it are skipped for that call.
+    constexprs; configs that fail it are skipped for that call.
 
     E.g. ``key=["M"]``, ``tuned={1024: A, 65536: B}``: the buckets are log2 10
     and 16, so M <= 8192 (bucket <= 13; 13 is a tie, won by A) takes A and
@@ -42,11 +52,14 @@ class Tuner:
     def __init__(
         self,
         key: Sequence[AutotuneKey],
-        tuned: Mapping[int | tuple[int, ...], Mapping[str, Any]],
+        tuned: Mapping[int | tuple[int, ...], Mapping[str, Any]] | None = None,
         valid: Callable[[Mapping[str, Any], Mapping[str, Any]], bool] | None = None,
+        configs: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
-        if not key or not tuned:
-            raise ValueError("Tuner: key and tuned must not be empty.")
+        if not key:
+            raise ValueError("Tuner: key must not be empty.")
+        if not tuned and not configs:
+            raise ValueError("Tuner: give tuned, configs or both.")
         # (arg name, tensor dim); the dim is None for an int arg.
         self.key: tuple[tuple[str, int | None], ...] = tuple(
             key_arg_and_dim(k) for k in key
@@ -54,13 +67,20 @@ class Tuner:
         self.valid: Callable[[Mapping[str, Any], Mapping[str, Any]], bool] | None = (
             valid
         )
-        self.routing: RoutingTable[dict[str, Any]] = RoutingTable.from_buckets(
-            bucket_table(tuned, key)
+        self.tuned: RoutingTable[dict[str, Any]] | None = (
+            RoutingTable.from_buckets(bucket_table(tuned, key)) if tuned else None
         )
+        self.configs: list[dict[str, Any]] = [dict(c) for c in configs or ()]
+        # Route group -> log2 buckets -> the fastest config, filled while
+        # collecting. Kept for the process, like Triton's Autotuner.cache.
+        self.timed: dict[str, dict[tuple[int, ...], dict[str, Any]]] = {}
         # The constexprs the op fills itself.
-        self.constexpr_names: frozenset[str] = config_names(
-            list(self.routing.entries.values())
-        )
+        self.constexpr_names: frozenset[str] = config_names(self.all_configs())
+
+    def all_configs(self) -> list[dict[str, Any]]:
+        """The ``tuned`` configs, then ``configs``."""
+        tuned = [] if self.tuned is None else list(self.tuned.entries.values())
+        return tuned + self.configs
 
     def check(self, arg_specs: Sequence[ArgSpec], op_name: str) -> None:
         """Reject constexprs and keys that the op's arg specs cannot back."""
@@ -71,7 +91,7 @@ class Tuner:
                 raise RuntimeError(
                     f"AOT-T {op_name}: autotuned {name} must be a ConstexprArg."
                 )
-            for config in self.routing.entries.values():
+            for config in self.all_configs():
                 if not isinstance(config[name], spec.python_type):
                     raise RuntimeError(
                         f"AOT-T {op_name}: autotune config {config} sets {name} to "
@@ -90,12 +110,15 @@ class Tuner:
     def routing_for(
         self, group: str, constexprs: Mapping[str, Any]
     ) -> RoutingTable[dict[str, Any]]:
-        """The routing table of a call in route ``group``: the entries whose
+        """The ``tuned`` entries, then the ones timed for route ``group``, whose
         config is valid with these other constexprs; may be empty."""
+        entries = {} if self.tuned is None else dict(self.tuned.entries)
+        entries |= self.timed.get(group, {})
+        routing = RoutingTable(entries)
         valid = self.valid
         if valid is None:
-            return self.routing
-        return self.routing.filter(lambda config: valid(config, constexprs))
+            return routing
+        return routing.filter(lambda config: valid(config, constexprs))
 
     def bind(
         self, arg_specs: Sequence[ArgSpec], op_name: str, *args: Any, **kwargs: Any
@@ -117,16 +140,40 @@ class Tuner:
         arg_specs: Sequence[ArgSpec],
         values: Mapping[str, Any],
         op_name: str,
+        time_configs: TimeConfigs | None,
     ) -> dict[str, Any]:
-        """The config for a call bound to ``values`` in route ``group``: the
-        nearest entry of its routing table."""
+        """The config for a call bound to ``values`` in route ``group``. While
+        collecting, ``time_configs`` times configs on the call: a bucket the routing
+        table lacks is timed over the valid ``configs`` and the fastest recorded.
+        Otherwise the nearest entry, or with none the first valid config."""
         constexprs = self.other_constexprs(arg_specs, values)
+        key_values = self.key_values(values, op_name)
         routing = self.routing_for(group, constexprs)
-        if not routing.entries:
-            raise RuntimeError(
-                f"AOT-T {op_name}: no autotune config is valid for {dict(constexprs)}."
+        valid = self.valid
+        candidates = [c for c in self.configs if valid is None or valid(c, constexprs)]
+        buckets = tuple(log2_bucket(v) for v in key_values)
+        if time_configs is not None and candidates and buckets not in routing.entries:
+            ms = time_configs(values, candidates)
+            # index keeps the first of equal times.
+            fastest = candidates[ms.index(min(ms))]
+            logger.info(
+                "AOT-T %s: log2 buckets %s timed %s at %s ms, fastest %s; route %s",
+                op_name,
+                buckets,
+                candidates,
+                ms,
+                fastest,
+                group,
             )
-        return routing.select(self.key_values(values, op_name))
+            self.timed.setdefault(group, {})[buckets] = fastest
+            return fastest
+        if routing.entries:
+            return routing.select(key_values)
+        if candidates:
+            return candidates[0]
+        raise RuntimeError(
+            f"AOT-T {op_name}: no autotune config is valid for {dict(constexprs)}."
+        )
 
     def key_values(self, values: Mapping[str, Any], op_name: str) -> list[int]:
         """Each key's value in a call bound to ``values``."""

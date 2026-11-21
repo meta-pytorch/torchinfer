@@ -8,6 +8,7 @@ from __future__ import annotations
 # the kernel. Imported lazily by CuTeAOT.__call__. Has no GPU imports of its own,
 # so it stays importable without a GPU (CPU tests import the cache-key helper).
 
+import functools
 from typing import Any, Callable
 
 from aot_tensor.arg_specs.common import module_basename_for_callable, spec_hash_key
@@ -33,14 +34,11 @@ def _compile_cache_key(
     )
 
 
-def run_cutedsl_jit(
-    compile_fn: Callable[..., Any], op: CuTeAOT, *args: Any, **kwargs: Any
-) -> Any:
-    """Bind ``op``'s call (``bind_call``: autotune, collect), then JIT-compile
-    (via ``compile_fn``, e.g. ``cutlass.cute.compile``) and run the kernel.
-    ``compile_fn`` is injected by the caller so this module needs no GPU-only
-    cutlass import of its own."""
-    values = bind_call(op, *args, **kwargs)
+def cutedsl_launcher(
+    compile_fn: Callable[..., Any], op: CuTeAOT, values: dict[str, Any]
+) -> Callable[[], Any]:
+    """``op``'s call bound to ``values``, JIT-compiled (via ``compile_fn``, e.g.
+    ``cutlass.cute.compile``) and ready to launch."""
     cute_args = build_cute_call_args(op.arg_specs, values)
     key = _compile_cache_key(op.jit_fn, op.arg_specs, op.name, values)
     cache = get_cutedsl_eager_cache()
@@ -53,4 +51,14 @@ def run_cutedsl_jit(
     runtime_args = [
         arg for cg, arg in zip(make_codegens(op.arg_specs), cute_args) if cg.is_runtime
     ]
-    return compiled(*runtime_args, cute_args[-1])
+    return lambda: compiled(*runtime_args, cute_args[-1])
+
+
+def run_cutedsl_jit(
+    compile_fn: Callable[..., Any], op: CuTeAOT, *args: Any, **kwargs: Any
+) -> Any:
+    """Bind ``op``'s call (``bind_call``: autotune, collect), then JIT-compile and
+    run the kernel. ``compile_fn`` is injected by the caller so this module needs
+    no GPU-only cutlass import of its own."""
+    launcher = functools.partial(cutedsl_launcher, compile_fn, op)
+    return launcher(bind_call(op, launcher, *args, **kwargs))()

@@ -14,7 +14,7 @@ from aot_tensor.arg_specs.common import (
     ScalarArg,
 )
 from aot_tensor.arg_specs.fly import FlyTensorArg
-from aot_tensor.autotune.autotune import Tuner
+from aot_tensor.autotune.autotune import TimeConfigs, Tuner
 from aot_tensor.autotune.routing import RoutingTable
 from aot_tensor.compile.adapter_base import hash_spec
 from aot_tensor.compile.spec_selector import (
@@ -133,11 +133,16 @@ _TUNER = Tuner(
 )
 
 
-def _collected(m: int, neg: bool) -> RawSpec:
-    """The spec a marker collects for this call: BM filled from ``tuned``."""
-    values = _TUNER.bind(_TUNED_SPECS, "op", torch.empty(m), m, NEG=neg)
-    group = route_group(_TUNED_SPECS, "op", values, _TUNER.constexpr_names)
-    config = _TUNER.best_config(group, _TUNED_SPECS, values, "op")
+def _collected(
+    m: int,
+    neg: bool,
+    tuner: Tuner = _TUNER,
+    time: TimeConfigs | None = None,
+) -> RawSpec:
+    """The spec a marker collects for this call: BM filled by ``tuner``."""
+    values = tuner.bind(_TUNED_SPECS, "op", torch.empty(m), m, NEG=neg)
+    group = route_group(_TUNED_SPECS, "op", values, tuner.constexpr_names)
+    config = tuner.best_config(group, _TUNED_SPECS, values, "op", time)
     spec, _ = sample_spec_and_hash(_TUNED_SPECS, "op", "mod", **(values | config))
     return spec
 
@@ -206,6 +211,26 @@ class VariantRoutesTest(unittest.TestCase):
                 ),
             ],
         )
+
+
+class TimedRoutesTest(unittest.TestCase):
+    def test_timed_buckets_route_to_their_fastest_config(self) -> None:
+        tuner = Tuner(key=[("x", 0)], configs=[{"BM": 1}, {"BM": 2}])
+        # BM=1 is faster at M=16, BM=2 at M=4096.
+        specs = [
+            _collected(16, False, tuner, lambda _, cfgs: [c["BM"] for c in cfgs]),
+            _collected(4096, False, tuner, lambda _, cfgs: [-c["BM"] for c in cfgs]),
+        ]
+        compiled = distinct_variants(
+            "op",
+            [
+                (s, hash_spec(s.hash_key), s.hash_key)
+                for s in expand_autotuned(specs, _TUNED_SPECS, "op", tuner)
+            ],
+        )
+        bm1, bm2 = (v.symbol for _, v in compiled)
+        (route,) = variant_routes("op", [(s.hash_key, v) for s, v in compiled], tuner)
+        self.assertEqual(route.table, RoutingTable({(4,): bm1, (12,): bm2}))
 
 
 class RenderSelectorTest(unittest.TestCase):

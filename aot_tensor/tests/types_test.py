@@ -8,12 +8,14 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import call, MagicMock, patch
 
-from aot_tensor.arg_specs.common import ScalarArg
+from aot_tensor.arg_specs.common import ConstexprArg, ScalarArg
 from aot_tensor.arg_specs.cute import CuTeTensorArg
 from aot_tensor.arg_specs.fly import FlyArgSpec, FlyTensorArg
+from aot_tensor.autotune.autotune import Tuner
 from aot_tensor.compile.aott_compile import enable_spec_collection
 from aot_tensor.compile.compile_state import get_aott_compile_state
 from aot_tensor.compile.cutedsl import eager as cutedsl_eager
+from aot_tensor.compile.eager_call import bind_call
 
 # Patched in test_call_runs_jit.
 # @dep=//aot_tensor/compile/cutedsl:adapter
@@ -461,6 +463,40 @@ class CuTeAOTTest(_MarkerResetTest):
         # collection fires once (with the op + args) only when AOT compile is enabled
         expected_calls = [call(op, n=5)] if enabled else []
         self.assertEqual(collect.call_args_list, expected_calls)
+
+    @parameterized.expand([("collecting", True), ("eager", False)])
+    def test_bind_call_times_configs_only_while_collecting(
+        self, _name: str, collecting: bool
+    ) -> None:
+        def kernel() -> None:
+            pass
+
+        op = cutedsl_aot(
+            jit_fn=kernel,
+            arg_specs=[ScalarArg("n", "i32"), ConstexprArg("BM", int)],
+            tuner=Tuner(key=["n"], configs=[{"BM": 1}, {"BM": 2}]),
+        )
+        if collecting:
+            enable_spec_collection()
+        launcher = MagicMock()
+        with (
+            # BM=2 is faster.
+            patch(
+                "aot_tensor.compile.eager_call.time_configs", return_value=[2.0, 1.0]
+            ) as time,
+            patch("aot_tensor.compile.cutedsl.adapter.collect") as collect,
+        ):
+            values = bind_call(op, launcher, 4096)
+
+        if collecting:
+            time.assert_called_once_with(launcher, {"n": 4096}, [{"BM": 1}, {"BM": 2}])
+            self.assertEqual(values, {"n": 4096, "BM": 2})
+            self.assertEqual(collect.call_args_list, [call(op, n=4096, BM=2)])
+        else:
+            # Untimed, a call takes the first valid config.
+            time.assert_not_called()
+            self.assertEqual(values, {"n": 4096, "BM": 1})
+            collect.assert_not_called()
 
 
 class FlyAOTTest(_MarkerResetTest):
