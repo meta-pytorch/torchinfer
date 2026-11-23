@@ -12,6 +12,7 @@ import os
 # @dep=//aot_tensor/compile/triton/templates:triton_templates
 from aot_tensor.compile.template_utils import TRITON_TEMPLATES
 from aot_tensor.compile.triton.utils import hash_kernel_name
+from aot_tensor.constants import TEXT_ENCODING
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ logger: logging.Logger = logging.getLogger(__name__)
 #
 # Why this matters for large binaries (>4GB):
 # - The cubin data is in .triton, which is placed beyond 4GB via linker script
-# - Code in .text accesses the pointer via R_X86_64_PC32 (±2GB range)
+# - Code in .text accesses the pointer via R_X86_64_PC32 (+/-2GB range)
 # - If pointer is in .triton (>4GB away), R_X86_64_PC32 overflows
 # - Solution: pointer in .data.rel.ro (near .text), data in .triton
 # - Pointer initialization uses R_X86_64_64 to reference .triton data (no limit)
@@ -113,7 +114,7 @@ def generate_cpp_for_kernel_binaries(
         "embedded_cubins.cpp", {"CUBIN_ARRAYS": kernel_binary_arrays}
     )
 
-    with open(output_filename, "w") as f:
+    with open(output_filename, "w", encoding=TEXT_ENCODING) as f:
         f.write(cpp_content)
 
     logger.info(f"Generated {output_filename}")

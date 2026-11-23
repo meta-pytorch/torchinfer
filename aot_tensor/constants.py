@@ -21,6 +21,11 @@ def check_dsls(dsls: Iterable[str]) -> frozenset[str]:
     return selected
 
 
+# Encoding for every text file AOT-T reads or writes (generated sources, templates).
+# Explicit so the host locale never decides it: remote lowering hosts can run with
+# an ASCII locale (LC_ALL=C), and Triton's generated C carries non-ASCII comments.
+TEXT_ENCODING: str = "utf-8"
+
 # Filename of the per-kernel torch-op schema JSON.
 AOTT_OP_SCHEMAS_FILE_NAME: str = "aott_op_schemas.json"
 

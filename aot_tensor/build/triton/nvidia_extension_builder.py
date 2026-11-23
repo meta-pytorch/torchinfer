@@ -20,6 +20,7 @@ from aot_tensor.build.extension_builder_base import (
 )
 from aot_tensor.build.triton import cubin_embedder
 from aot_tensor.compile.triton.launch_header import find_launch_header
+from aot_tensor.constants import TEXT_ENCODING
 from setuptools import Extension, setup
 
 
@@ -45,7 +46,7 @@ def extract_kernel_variants_from_cpp_files(source_dir: str) -> list[str]:
 
     for cpp_file in cpp_files:
         cpp_path = os.path.join(source_dir, cpp_file)
-        with open(cpp_path, "r") as f:
+        with open(cpp_path, "r", encoding=TEXT_ENCODING) as f:
             content = f.read()
             matches = CUBIN_VAR_PATTERN.findall(content)
             kernel_variants.extend(matches)

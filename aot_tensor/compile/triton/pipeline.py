@@ -3,7 +3,7 @@
 
 """AOT-T compilation pipeline.
 
-Orchestrates: spec processing → Triton native compile → C++ / Python codegen.
+Orchestrates: spec processing -> Triton native compile -> C++ / Python codegen.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ from aot_tensor.compile.triton.spec_processing import (
     RawKernelSpec,
 )
 from aot_tensor.compile.triton.utils import is_autotuner, unwrap_to_jit
-from aot_tensor.constants import AOTT_OP_SCHEMAS_FILE_NAME
+from aot_tensor.constants import AOTT_OP_SCHEMAS_FILE_NAME, TEXT_ENCODING
 from triton.backends.compiler import GPUTarget
 from triton.runtime.jit import KernelInterface
 
@@ -281,7 +281,7 @@ def compile_to_cpp(
         autotune_fields,
     )
 
-    with open(h_out, "w") as fp:
+    with open(h_out, "w", encoding=TEXT_ENCODING) as fp:
         fp.write(h_content)
 
     # Kernel names key the cubin files on disk -- reject collisions before
@@ -323,7 +323,7 @@ def compile_to_cpp(
         gpu_target.backend,
         guard_aliases=guard_aliases,
     )
-    with open(cu_out, "w") as fp:
+    with open(cu_out, "w", encoding=TEXT_ENCODING) as fp:
         fp.write(cu_content)
 
     # Generate torch_op.cpp file
@@ -331,10 +331,10 @@ def compile_to_cpp(
         func, descriptors, prefix, default_values, autotune_fields, op_namespace
     )
 
-    with open(torch_out, "w") as fp:
+    with open(torch_out, "w", encoding=TEXT_ENCODING) as fp:
         fp.write(torch_op_content)
 
-    with open(schema_out, "w") as fp:
+    with open(schema_out, "w", encoding=TEXT_ENCODING) as fp:
         json.dump(
             [gen_torch_op_schema(func, descriptors, default_values, autotune_fields)],
             fp,
@@ -342,7 +342,7 @@ def compile_to_cpp(
         )
         fp.write("\n")
 
-    with open(py_out, "w") as fp:
+    with open(py_out, "w", encoding=TEXT_ENCODING) as fp:
         fp.write(
             gen_tuner_meta_py(
                 meta_func,
