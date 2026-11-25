@@ -94,6 +94,8 @@ class GetExtraCompileArgsTest(unittest.TestCase):
 
         self.assertIn("--embed-dir=/some/source/dir", nvidia_args)
         self.assertIn("-Wno-c23-extensions", nvidia_args)
+        self.assertIn("-DUSE_ROCM=1", args)
+        self.assertIn("-DUSE_CUDA", args)
         self.assertEqual(
             [
                 *nvidia_args,

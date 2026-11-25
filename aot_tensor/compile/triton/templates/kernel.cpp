@@ -15,7 +15,7 @@ inline void triton_aot_cu_check(CUresult err, const char* file, int line) {
     (void)cuGetErrorString(err, &err_str);
     throw std::runtime_error(
         std::string(file) + ":" + std::to_string(line) +
-        " CUDA driver error: " + (err_str ? err_str : "unknown"));
+        " GPU driver error: " + (err_str ? err_str : "unknown"));
   }
 }
 #define TRITON_AOT_CU_CHECK(EXPR) triton_aot_cu_check(EXPR, __FILE__, __LINE__)
@@ -28,7 +28,7 @@ inline cudaStream_t triton_aot_get_current_stream(int32_t device_idx) {
   // TODO: No torch::stable op provides the same functionality
   // today. Revisit if torch exposes a proper stable::accelerator stream API.
   if (aoti_torch_get_current_cuda_stream(device_idx, &stream_ptr) != 0) {
-    throw std::runtime_error("Failed to get current CUDA stream");
+    throw std::runtime_error("Failed to get current GPU stream");
   }
   return reinterpret_cast<cudaStream_t>(stream_ptr);
 }
@@ -61,6 +61,11 @@ namespace {
 // launch-time ``OutOfResources`` check (``compiler.py::_init_handles``)
 // doesn't fire under AOT-T.
 void enable_large_smem_or_throw(int shared, CUfunction func) {
+#ifdef USE_ROCM
+  // HIP LDS needs no opt-in. TODO: validate its hardware limit here.
+  (void)shared;
+  (void)func;
+#else
   CUdevice device;
   TRITON_AOT_CU_CHECK(cuCtxGetDevice(&device));
   int shared_optin;
@@ -86,6 +91,7 @@ void enable_large_smem_or_throw(int shared, CUfunction func) {
         CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
         shared_optin - shared_static));
   }
+#endif
 }
 } // namespace
 
