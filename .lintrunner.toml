@@ -31,3 +31,21 @@ init_command = [
     'usort==1.1.0',
 ]
 is_formatter = true
+
+[[linter]]
+code = 'HIPTEMPLATES'
+include_patterns = [
+    'aot_tensor/compile/triton/gen_hip_templates.py',
+    'aot_tensor/compile/triton/templates/kernel.h',
+    'aot_tensor/compile/triton/templates/kernel.cpp',
+    'aot_tensor/compile/triton/templates/hip/kernel.h',
+    'aot_tensor/compile/triton/templates/hip/kernel.cpp',
+]
+command = [
+    'python',
+    '-m',
+    'aot_tensor.compile.triton.hip_template_linter',
+    '--templates-dir=aot_tensor/compile/triton/templates',
+    '@{{PATHSFILE}}',
+]
+is_formatter = true

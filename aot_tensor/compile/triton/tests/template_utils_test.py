@@ -53,16 +53,14 @@ class TemplateUtilsTest(unittest.TestCase):
             self.assertIn(s, template)
 
     def test_render_marks_output_as_generated(self) -> None:
-        """Only ``render`` adds the marker; ``load`` returns the template as-is,
-        which is what keeps the hand-written templates linted."""
         rendered = TRITON_TEMPLATES.render(
-            "kernel.h", {"TUNER_META_CPP": "", "SELECTOR_PROTO": ""}
+            "torch_op.cpp", {"HEADER_INCLUDE": "", "TORCH_OP": ""}
         )
         self.assertTrue(
             rendered.startswith(f"// {GENERATED_TOKEN}"),
             f"expected the generated marker first, got: {rendered[:60]!r}",
         )
-        self.assertNotIn(GENERATED_TOKEN, TRITON_TEMPLATES.load("kernel.h"))
+        self.assertNotIn(GENERATED_TOKEN, TRITON_TEMPLATES.load("torch_op.cpp"))
 
     @parameterized.expand([("TRITON_AOT",), ("CUTEDSL_AOT",)])
     def test_render_template_replaces_block(self, tag: str) -> None:

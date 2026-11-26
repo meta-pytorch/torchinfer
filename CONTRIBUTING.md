@@ -37,9 +37,21 @@ We actively welcome your pull requests.
    `pip install` command after changing package code before running examples or
    otherwise validating the installed package.
 
-   If you edit `kernel.h` or `kernel.cpp` in `aot_tensor/compile/triton/templates/`,
-   make the same change to its HIP version in the `hip/` subdirectory. A test
-   checks that the two define the same functions.
+   Edit only the CUDA `kernel.h` and `kernel.cpp` templates. Their `hip/`
+   copies are generated; preserve backend-specific behavior with `USE_ROCM`.
+   Regenerate and check them from the repository root:
+
+   ```bash
+   python -m aot_tensor.compile.triton.gen_hip_templates --write \
+     --templates-dir aot_tensor/compile/triton/templates
+   python -m aot_tensor.compile.triton.gen_hip_templates --check \
+     --templates-dir aot_tensor/compile/triton/templates
+   ```
+
+   For reproducible standalone generation, use Torch 2.14.0 in a separate
+   development environment; it does not change the AMD runtime dependency.
+   The generator uses Torch's hipify engine. CI compares the generated copies
+   byte-for-byte; review mapping changes when updating the generator engine.
 5. Make sure your Python code lints. From the repository root, install
    [Lintrunner](https://github.com/pytorch/pytorch/wiki/lintrunner) and the
    adapter required by `.lintrunner.toml`:
@@ -58,12 +70,15 @@ We actively welcome your pull requests.
    lintrunner aot_tensor/api/loading.py
    ```
 
-   Format locally changed Python files with `lintrunner f`. To check every
-   Python file, run `lintrunner --all-files`.
+   Format changed files with `lintrunner f`. Its `HIPTEMPLATES` formatter also
+   regenerates the HIP copies after a CUDA template or generator edit:
 
-   A warning about a missing `.lintrunner.private.toml` is harmless. This
-   configuration checks `.py` and `.pyi` files only; it does not format C++ or
-   run tests.
+   ```bash
+   lintrunner format --take=HIPTEMPLATES aot_tensor/compile/triton/templates/kernel.h
+   ```
+
+   A warning about a missing `.lintrunner.private.toml` is harmless. Lintrunner
+   checks Python formatting and generated HIP freshness; it does not run tests.
 6. If you haven't already, complete the Contributor License Agreement ("CLA").
 ## Contributor License Agreement ("CLA")
 In order to accept your pull request, we need you to submit a CLA. You only need
